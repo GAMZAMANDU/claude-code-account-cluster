@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+"""cc — Claude Code multi-account switcher.
+
+Usage:
+  cc              List accounts (default)
+  cc ls           List accounts with rate limit bars
+  cc use [index]  Switch account (fzf picker if no index)
+  cc best         Auto-switch to account with most capacity
+  cc log [n]      Show switch history (default: 20)
+  cc stats        Usage heatmap and session statistics
+  cc capture      Save current login and logout
+  cc help         Show this help
+"""
+import json, os, sys, subprocess, shutil, re, stat, tempfile
+from datetime import datetime, date, timedelta, timezone
+from collections import defaultdict
+
+STORE      = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
+CREDS_FILE = os.path.expanduser("~/.claude/.credentials.json")
+CONFIG     = os.path.expanduser("~/.claude.json")
+HISTORY    = os.path.expanduser("~/.cc-multiaccounts-history.jsonl")
+STATS_FILE = os.path.expanduser("~/.claude/stats-cache.json")
+
+RESET   = "\033[0m"
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+GREEN   = "\033[32m"
+YELLOW  = "\033[33m"
+RED     = "\033[31m"
+CYAN    = "\033[36m"
+WHITE   = "\033[97m"
+BLUE    = "\033[34m"
+MAGENTA = "\033[35m"
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def get_active_uuid():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f).get("oauthAccount", {}).get("accountUuid")
+    except:
+        return None
+
+def sync_keychain():
+    try:
+        creds_raw = subprocess.check_output(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+        with open(CREDS_FILE, "w") as f:
+            f.write(creds_raw + "\n")
+    except:
+        pass
+    subprocess.run(["cc-switch"], capture_output=True)
+
+def load_store():
+    with open(STORE) as f:
+        return json.load(f)
+
+def best_idx(accounts):
+    best, best_score = None, (-1, -1)
+    for i, acc in enumerate(accounts):
+        usage = acc.get("usageSnapshot", {})
+        fh    = (usage.get("five_hour") or {}).get("utilization")
+        sd    = (usage.get("seven_day")  or {}).get("utilization")
+        score = (100 - fh if fh is not None else 100,
+                 100 - sd if sd is not None else 100)
+        if score > best_score:
+            best_score, best = score, i
+    return best
+
+def fmt_pct(pct):
+    return f"{pct:.0f}%" if pct is not None else "?%"
+
+def color_pct(pct):
+    if pct is None:
+        return DIM + " ?%" + RESET
+    c = GREEN if pct <= 40 else YELLOW if pct <= 75 else RED
+    return c + f"{pct:3.0f}%" + RESET
+
+def bar(pct, width=12):
+    if pct is None:
+        return DIM + "─" * width + RESET
+    filled = round(pct / 100 * width)
+    color = GREEN if pct <= 40 else YELLOW if pct <= 75 else RED
+    return color + "█" * filled + DIM + "░" * (width - filled) + RESET
+
+def fmt_reset(iso):
+    if not iso:
+        return DIM + "     ?" + RESET
+    try:
+        dt   = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        diff = (dt - datetime.now(timezone.utc)).total_seconds()
+        if diff <= 0:
+            return GREEN + "  now" + RESET
+        h, m = int(diff // 3600), int((diff % 3600) // 60)
+        return CYAN + (f"{h:2d}h{m:02d}m" if h > 0 else f"  {m:2d}m") + RESET
+    except:
+        return DIM + "     ?" + RESET
+
+def fmt_used(iso):
+    if not iso:
+        return DIM + "never" + RESET
+    try:
+        diff = (datetime.now(timezone.utc) -
+                datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds()
+        if diff < 60:     return GREEN + "  just now" + RESET
+        if diff < 3600:   return WHITE + f"{int(diff//60):3d}m ago" + RESET
+        if diff < 86400:  return DIM   + f"{int(diff//3600):3d}h ago" + RESET
+        return DIM + f"{int(diff//86400):3d}d ago" + RESET
+    except:
+        return DIM + "     ?" + RESET
+
+def append_history(from_idx, to_idx, from_acc, to_acc):
+    entry = {
+        "ts":        datetime.now(timezone.utc).isoformat(),
+        "from_idx":  from_idx,  "to_idx":    to_idx,
+        "from_name": (from_acc.get("metadata") or {}).get("displayName", "?"),
+        "to_name":   (to_acc.get("metadata")   or {}).get("displayName", "?"),
+        "from_5h":   ((from_acc.get("usageSnapshot") or {}).get("five_hour") or {}).get("utilization"),
+        "to_5h":     ((to_acc.get("usageSnapshot")   or {}).get("five_hour") or {}).get("utilization"),
+    }
+    with open(HISTORY, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+# ── cc ls ─────────────────────────────────────────────────────────────────────
+
+def cmd_ls(_args):
+    sync_keychain()
+    store       = load_store()
+    accounts    = store.get("accounts", [])
+    active_uuid = get_active_uuid()
+    best        = best_idx(accounts)
+
+    print()
+    print(f"  {BOLD}Claude Accounts{RESET}  {DIM}({len(accounts)} stored){RESET}")
+    print(f"  {DIM}{'─'*64}{RESET}")
+    print(f"  {DIM}{'':4}{'Name/Email':28} {'5H':>14}  {'7D':>14}  {'Last Used':>10}{RESET}")
+    print(f"  {DIM}{'─'*64}{RESET}")
+
+    for i, acc in enumerate(accounts):
+        meta      = acc.get("metadata", {})
+        usage     = acc.get("usageSnapshot", {})
+        uuid      = meta.get("accountUuid")
+        is_active = uuid == active_uuid
+        is_best   = i == best and not is_active
+
+        name  = meta.get("displayName", "?")
+        email = meta.get("emailAddress", "")
+        org   = meta.get("organizationType", meta.get("seatTier", ""))
+        plan  = {"claude_pro": "Pro", "claude_team": "Team", "team_standard": "Team Std"}.get(org, org or "?")
+
+        fh       = usage.get("five_hour", {})
+        sd       = usage.get("seven_day", {})
+        fh_pct   = fh.get("utilization")
+        sd_pct   = sd.get("utilization")
+
+        prefix   = f"{GREEN}{BOLD}▶{RESET}" if is_active else f"{YELLOW}★{RESET}" if is_best else " "
+        idx_str  = f"{BOLD}[{i}]{RESET}" if is_active else f"{DIM}[{i}]{RESET}"
+        name_str = f"{BOLD}{WHITE}{name}{RESET}" if is_active else name
+        tag      = f"  {GREEN}{BOLD}active{RESET}" if is_active else f"  {YELLOW}best{RESET}" if is_best else ""
+
+        print(f"  {prefix} {idx_str} {name_str} {CYAN}{plan}{RESET}{tag}")
+        print(f"       {DIM}{email[:24]}{RESET}")
+        print(f"       5H {bar(fh_pct)} {fmt_pct(fh_pct)} {DIM}resets{RESET} {fmt_reset(fh.get('resets_at'))}")
+        print(f"       7D {bar(sd_pct)} {fmt_pct(sd_pct)} {DIM}resets{RESET} {fmt_reset(sd.get('resets_at'))}")
+        print(f"       {DIM}last used{RESET} {fmt_used(acc.get('lastUsedAt'))}")
+        if i < len(accounts) - 1:
+            print(f"  {DIM}{'─'*64}{RESET}")
+
+    print(f"  {DIM}{'─'*64}{RESET}")
+    print(f"  {DIM}cc use to switch  ·  cc best for auto  ·  cc log for history{RESET}")
+    print()
+
+# ── cc use ────────────────────────────────────────────────────────────────────
+
+def fzf_pick(accounts, active_uuid):
+    lines = []
+    for i, acc in enumerate(accounts):
+        meta  = acc.get("metadata", {})
+        usage = acc.get("usageSnapshot", {})
+        fh    = (usage.get("five_hour") or {}).get("utilization")
+        sd    = (usage.get("seven_day")  or {}).get("utilization")
+        mark  = "▶" if meta.get("accountUuid") == active_uuid else " "
+        lines.append(f"[{i}]{mark} {meta.get('displayName','?')} <{meta.get('emailAddress','?')}>  5H:{fmt_pct(fh)}  7D:{fmt_pct(sd)}")
+    proc = subprocess.run(
+        ["fzf", "--prompt=Switch to> ", "--height=50%", "--border", "--reverse"],
+        input="\n".join(lines), text=True, stdout=subprocess.PIPE
+    )
+    if proc.returncode != 0:
+        return None
+    m = re.match(r'\[(\d+)\]', proc.stdout.strip())
+    return int(m.group(1)) if m else None
+
+def prompt_pick(accounts, active_uuid):
+    for i, acc in enumerate(accounts):
+        meta  = acc.get("metadata", {})
+        usage = acc.get("usageSnapshot", {})
+        fh    = (usage.get("five_hour") or {}).get("utilization")
+        sd    = (usage.get("seven_day")  or {}).get("utilization")
+        mark  = " ▶" if meta.get("accountUuid") == active_uuid else "  "
+        print(f"  [{i}]{mark} {meta.get('displayName','?')} <{meta.get('emailAddress','?')}>  5H:{fmt_pct(fh)}  7D:{fmt_pct(sd)}")
+    try:
+        return int(input("\nSelect index: ").strip())
+    except (ValueError, EOFError):
+        return None
+
+def do_switch(accounts, active_uuid, index):
+    if index >= len(accounts):
+        print(f"Error: no account at index {index}", file=sys.stderr)
+        sys.exit(1)
+
+    active_idx = next((i for i, a in enumerate(accounts)
+                       if (a.get("metadata") or {}).get("accountUuid") == active_uuid), None)
+    from_acc = accounts[active_idx] if active_idx is not None else {}
+    to_acc   = accounts[index]
+
+    if active_idx is not None and active_idx != index:
+        from_fh = ((from_acc.get("usageSnapshot") or {}).get("five_hour") or {}).get("utilization")
+        to_fh   = ((to_acc.get("usageSnapshot")   or {}).get("five_hour") or {}).get("utilization")
+        print(f"\n  [{active_idx}] {(from_acc.get('metadata') or {}).get('displayName','?')}  5H: {color_pct(from_fh)}")
+        print(f"       {DIM}↓{RESET}")
+        print(f"  [{index}] {(to_acc.get('metadata') or {}).get('displayName','?')}  5H: {color_pct(to_fh)}\n")
+
+    meta       = to_acc.get("metadata", {})
+    creds_json = json.dumps(to_acc.get("credentials", {}))
+
+    os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+    with open(CREDS_FILE, "w") as f:
+        f.write(creds_json + "\n")
+
+    r = subprocess.run(
+        ["security", "add-generic-password", "-s", "Claude Code-credentials",
+         "-a", os.environ.get("USER", ""), "-w", creds_json, "-U"],
+        capture_output=True, text=True
+    )
+    if r.returncode != 0:
+        print(f"Keychain update failed: {r.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Keychain updated → [{index}] {meta.get('displayName','?')} <{meta.get('emailAddress','?')}>")
+
+    r = subprocess.run(["cc-switch", str(index)], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        sys.exit(1)
+    for line in r.stdout.splitlines():
+        if any(k in line for k in ("Switched", "Restart", "active account")):
+            print(line)
+
+    append_history(active_idx, index, from_acc, to_acc)
+
+def cmd_use(args):
+    sync_keychain()
+    store       = load_store()
+    accounts    = store.get("accounts", [])
+    active_uuid = get_active_uuid()
+
+    if not args:
+        if not sys.stdin.isatty():
+            subprocess.run(["cc-switch"])
+            return
+        index = fzf_pick(accounts, active_uuid) if shutil.which("fzf") else prompt_pick(accounts, active_uuid)
+        if index is None:
+            print("Cancelled.")
+            sys.exit(0)
+    else:
+        if sys.stdin.isatty():
+            print(f"{YELLOW}⚠  Run OUTSIDE Claude Code — Keychain update breaks active session.{RESET}")
+            print(f"{YELLOW}   Close Claude Code first, run cc use, then relaunch.{RESET}\n")
+            ans = input("Continue anyway? [y/N] ").strip().lower()
+            if ans != "y":
+                print("Cancelled.")
+                sys.exit(0)
+        index = int(args[0])
+
+    do_switch(accounts, active_uuid, index)
+
+# ── cc best ───────────────────────────────────────────────────────────────────
+
+def cmd_best(_args):
+    sync_keychain()
+    store       = load_store()
+    accounts    = store.get("accounts", [])
+    active_uuid = get_active_uuid()
+    idx         = best_idx(accounts)
+
+    if idx is None:
+        print("No accounts found.")
+        sys.exit(1)
+
+    acc  = accounts[idx]
+    meta = acc.get("metadata", {})
+    uuid = meta.get("accountUuid")
+
+    usage  = acc.get("usageSnapshot", {})
+    fh_pct = (usage.get("five_hour") or {}).get("utilization")
+    sd_pct = (usage.get("seven_day")  or {}).get("utilization")
+    fh_rem = 100 - fh_pct if fh_pct is not None else 100
+    sd_rem = 100 - sd_pct if sd_pct is not None else 100
+
+    if uuid == active_uuid:
+        print(f"Already on best account: [{idx}] {meta.get('displayName','?')} <{meta.get('emailAddress','?')}> (5H:{fh_rem}% 7D:{sd_rem}%)")
+        sys.exit(0)
+
+    print(f"Best: [{idx}] {meta.get('displayName','?')} <{meta.get('emailAddress','?')}> (5H:{fh_rem}% 7D:{sd_rem}%)")
+
+    if os.environ.get("CLAUDECODE") == "1":
+        session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        claude_pid = os.environ.get("CMUX_CLAUDE_PID", "")
+        claude_bin = os.environ.get("CMUX_AGENT_LAUNCH_EXECUTABLE",
+                     os.path.expanduser("~/.local/bin/claude"))
+
+        script = f"""#!/usr/bin/env bash
+sleep 0.5
+cc use {idx}
+sleep 0.3
+if [ -n "{session_id}" ]; then
+    {claude_bin} --resume {session_id}
+else
+    {claude_bin}
+fi
+"""
+        fd, path = tempfile.mkstemp(suffix=".sh", prefix="cc-resume-")
+        with os.fdopen(fd, "w") as f:
+            f.write(script)
+        os.chmod(path, stat.S_IRWXU)
+
+        subprocess.Popen(
+            ["nohup", "bash", path],
+            stdout=open("/tmp/cc-resume.log", "w"),
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        print(f"Switching → will resume session {session_id[:8]}... after restart.")
+        if claude_pid:
+            os.kill(int(claude_pid), 15)
+        sys.exit(0)
+    else:
+        do_switch(accounts, active_uuid, idx)
+
+# ── cc log ────────────────────────────────────────────────────────────────────
+
+def cmd_log(args):
+    limit = int(args[0]) if args else 20
+
+    if not os.path.exists(HISTORY):
+        print(f"\n  {DIM}No history yet. Use cc use or cc best to switch accounts.{RESET}\n")
+        return
+
+    entries = []
+    with open(HISTORY) as f:
+        for line in f:
+            try:
+                entries.append(json.loads(line.strip()))
+            except:
+                pass
+
+    if not entries:
+        print(f"\n  {DIM}No history.{RESET}\n")
+        return
+
+    recent = entries[-limit:][::-1]
+    print()
+    print(f"  {BOLD}Switch History{RESET}  {DIM}(last {len(recent)} of {len(entries)}){RESET}")
+    print(f"  {DIM}{'─'*58}{RESET}")
+    for e in recent:
+        try:
+            ts = datetime.fromisoformat(e["ts"]).astimezone().strftime("%m/%d %H:%M")
+        except:
+            ts = e.get("ts", "")[:16]
+        print(f"  {DIM}{ts}{RESET}  [{e.get('from_idx','?')}] {e.get('from_name','?')} {color_pct(e.get('from_5h'))} {DIM}→{RESET} [{e.get('to_idx','?')}] {e.get('to_name','?')} {color_pct(e.get('to_5h'))}")
+    print(f"  {DIM}{'─'*58}{RESET}")
+    print(f"  {DIM}Total switches: {len(entries)}{RESET}")
+    print()
+
+# ── cc stats ──────────────────────────────────────────────────────────────────
+
+def _total_tokens(model_usage):
+    t = 0
+    for v in model_usage.values():
+        t += v.get("inputTokens", 0) + v.get("outputTokens", 0)
+        t += v.get("cacheReadInputTokens", 0) + v.get("cacheCreationInputTokens", 0)
+    return t
+
+def _fmt_tokens(n):
+    for unit, div in [("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]:
+        if n >= div:
+            return f"{n/div:.1f}{unit}"
+    return str(n)
+
+def _fmt_dur(ms):
+    s = ms // 1000
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, _ = divmod(s, 60)
+    parts = [f"{d}d" if d else "", f"{h}h" if h else "", f"{m}m" if m else ""]
+    return " ".join(p for p in parts if p) or "0m"
+
+def _favorite_model(model_usage):
+    if not model_usage:
+        return "?"
+    name = max(model_usage.items(), key=lambda x: x[1].get("outputTokens", 0))[0]
+    name = re.sub(r"claude-|-2025\d{4}", "", name)
+    parts = name.split("-")
+    text  = " ".join(p.capitalize() for p in parts if not p.replace(".", "").isdigit())
+    nums  = ".".join(p for p in parts if p.replace(".", "").isdigit())
+    return (text + " " + nums).strip()
+
+def _heatmap(day_map, weeks=53):
+    today  = date.today()
+    start  = today - timedelta(weeks=weeks - 1)
+    start  = start - timedelta(days=start.weekday())
+    vals   = sorted(v for v in day_map.values() if v > 0)
+    n      = len(vals)
+    p25, p50, p75 = (vals[n//4], vals[n//2], vals[n*3//4]) if n else (1, 5, 15)
+    CHARS  = ["·", "░", "▒", "▓", "█"]
+    COLORS = [DIM, "\033[38;5;22m", "\033[38;5;28m", "\033[38;5;34m", GREEN + BOLD]
+
+    grid, month_labels = [], {}
+    for col in range(weeks):
+        week_chars = []
+        for row in range(7):
+            d  = start + timedelta(weeks=col, days=row)
+            ds = d.strftime("%Y-%m-%d")
+            cnt = day_map.get(ds, 0)
+            if d > today:
+                week_chars.append((" ", ""))
+            elif cnt == 0:
+                week_chars.append((CHARS[0], COLORS[0]))
+            elif cnt <= p25:
+                week_chars.append((CHARS[1], COLORS[1]))
+            elif cnt <= p50:
+                week_chars.append((CHARS[2], COLORS[2]))
+            elif cnt <= p75:
+                week_chars.append((CHARS[3], COLORS[3]))
+            else:
+                week_chars.append((CHARS[4], COLORS[4]))
+            if d.day == 1 and row == 0:
+                month_labels[col] = d.strftime("%b")
+        grid.append(week_chars)
+
+    header, prev_col = "     ", -4
+    for col in range(weeks):
+        label = month_labels.get(col)
+        if label and col - prev_col >= 3:
+            header += f"{CYAN}{label}{RESET}"
+            prev_col = col
+        else:
+            header += " "
+    print(header)
+
+    for row in range(7):
+        label = ["    ", "Mon ", "    ", "Wed ", "    ", "Fri ", "    "][row]
+        line  = f"  {DIM}{label}{RESET}"
+        for col in range(weeks):
+            ch, co = grid[col][row]
+            line += f"{co}{ch}{RESET}"
+        print(line)
+
+    print()
+    legend = "  Less "
+    for ch, co in zip(CHARS[1:], COLORS[1:]):
+        legend += f"{co}{ch}{RESET} "
+    print(legend + "More")
+
+def _streaks(day_map):
+    if not day_map:
+        return 0, 0, None, 0
+    today   = date.today()
+    longest, cur, prev = 0, 0, None
+    max_count, max_day = 0, None
+    for ds in sorted(day_map):
+        d   = date.fromisoformat(ds)
+        cnt = day_map[ds]
+        if cnt > 0:
+            if cnt > max_count:
+                max_count, max_day = cnt, ds
+            cur = (cur + 1) if prev and (d - prev).days == 1 else 1
+            longest = max(longest, cur)
+            prev = d
+        else:
+            prev, cur = None, 0
+    d = today
+    if not day_map.get(d.strftime("%Y-%m-%d"), 0):
+        d -= timedelta(days=1)
+    streak = 0
+    while day_map.get(d.strftime("%Y-%m-%d"), 0):
+        streak += 1
+        d -= timedelta(days=1)
+    active = sum(1 for v in day_map.values() if v > 0)
+    return longest, streak, max_day, active
+
+def cmd_stats(_args):
+    try:
+        with open(STATS_FILE) as f:
+            d = json.load(f)
+    except FileNotFoundError:
+        print(f"\n  {RED}Stats cache not found: {STATS_FILE}{RESET}\n")
+        sys.exit(1)
+
+    day_map  = {e["date"]: e["messageCount"] for e in d.get("dailyActivity", [])}
+    model_u  = d.get("modelUsage", {})
+    first    = d.get("firstSessionDate", "")
+    total_s  = d.get("totalSessions", 0)
+    longest  = d.get("longestSession", {})
+
+    if first:
+        first_day  = datetime.fromisoformat(first.replace("Z", "+00:00")).date()
+        total_days = (date.today() - first_day).days + 1
+    else:
+        total_days = 1
+
+    longest_s, current_s, max_day, active = _streaks(day_map)
+
+    print()
+    print(f"  {BOLD}{WHITE}Overview{RESET}   {DIM}Models{RESET}")
+    print()
+    _heatmap(day_map)
+    print()
+    w = 28
+    print(f"  {DIM}{'─'*56}{RESET}")
+    print(f"  {DIM}Favorite model:{RESET} {CYAN}{_favorite_model(model_u):<{w}}{RESET}{DIM}Total tokens:{RESET} {GREEN}{_fmt_tokens(_total_tokens(model_u))}{RESET}")
+    print()
+    print(f"  {DIM}Sessions:{RESET} {WHITE}{total_s:<{w-1}}{RESET}{DIM}Longest session:{RESET} {YELLOW}{_fmt_dur(longest.get('duration',0))}{RESET}")
+    print(f"  {DIM}Active days:{RESET} {WHITE}{active}/{total_days:<{w-len(str(active))-1}}{RESET}{DIM}Longest streak:{RESET} {YELLOW}{longest_s} days{RESET}")
+    try:
+        max_fmt = date.fromisoformat(max_day).strftime("%b %-d") if max_day else "?"
+    except:
+        max_fmt = max_day or "?"
+    print(f"  {DIM}Most active day:{RESET} {WHITE}{max_fmt:<{w}}{RESET}{DIM}Current streak:{RESET} {GREEN}{current_s} days{RESET}")
+    print(f"  {DIM}{'─'*56}{RESET}")
+    print()
+
+# ── cc capture ────────────────────────────────────────────────────────────────
+
+def cmd_capture(_args):
+    print("Syncing credentials from Keychain...")
+    try:
+        creds_raw = subprocess.check_output(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+        with open(CREDS_FILE, "w") as f:
+            f.write(creds_raw + "\n")
+    except subprocess.CalledProcessError:
+        print(f"{RED}Error: no credentials found in Keychain. Are you logged in?{RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    print("Saving account snapshot...")
+    subprocess.run(["cc-switch"])
+
+    print("Logging out...")
+    subprocess.run(["claude", "auth", "logout"])
+    print("Done. Run 'cc use' to switch accounts.")
+
+# ── cc help ───────────────────────────────────────────────────────────────────
+
+def cmd_help(_args):
+    print(f"""
+  {BOLD}cc — Claude Code multi-account switcher{RESET}
+  {DIM}{'─'*48}{RESET}
+
+  {CYAN}cc{RESET}              계정 목록 + rate limit 시각화
+  {CYAN}cc ls{RESET}           계정 목록 (위와 동일)
+  {CYAN}cc use{RESET}          fzf 인터랙티브 계정 선택
+  {CYAN}cc use{RESET} {DIM}<n>{RESET}     지정 계정으로 전환 {YELLOW}(Claude Code 종료 후){RESET}
+  {CYAN}cc best{RESET}         5H 최대 여유 계정으로 자동 전환
+  {CYAN}cc log{RESET} {DIM}[n]{RESET}    전환 이력 조회 (기본 20개)
+  {CYAN}cc stats{RESET}        사용량 히트맵 + 통계
+  {CYAN}cc capture{RESET}      현재 로그인 계정 저장 후 자동 로그아웃
+  {CYAN}cc help{RESET}         이 도움말
+
+  {BOLD}계정 추가{RESET}
+  {DIM}{'─'*48}{RESET}
+  1. {GREEN}claude auth login{RESET}   → 추가할 계정으로 로그인
+  2. {GREEN}cc capture{RESET}          → 캡처 + 자동 로그아웃
+  3. 반복 후 {GREEN}claude auth login{RESET} 으로 메인 계정 복구
+
+  {BOLD}계정 전환{RESET}
+  {DIM}{'─'*48}{RESET}
+  1. Claude Code {YELLOW}종료{RESET}
+  2. {GREEN}cc best{RESET} 또는 {GREEN}cc use{RESET} (fzf picker)
+  3. Claude Code 재실행
+
+  {DIM}rate limit 막히면: cc best 로 즉시 전환{RESET}
+""")
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+COMMANDS = {
+    "ls":      cmd_ls,
+    "use":     cmd_use,
+    "best":    cmd_best,
+    "log":     cmd_log,
+    "stats":   cmd_stats,
+    "capture": cmd_capture,
+    "help":    cmd_help,
+}
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        cmd_ls([])
+        return
+    cmd  = args[0].lower()
+    rest = args[1:]
+    if cmd in COMMANDS:
+        COMMANDS[cmd](rest)
+    else:
+        print(f"{RED}Unknown command: {cmd}{RESET}", file=sys.stderr)
+        print(f"Run {CYAN}cc help{RESET} for usage.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

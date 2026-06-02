@@ -27,14 +27,19 @@ bash install.sh
 
 ## Commands
 
+All commands go through the single `cc` binary:
+
 | Command | Description |
 |---------|-------------|
-| `cc-ls` | List all accounts with rate limit progress bars |
-| `cc-stats` | GitHub-style usage heatmap + session statistics |
-| `cc-best` | Auto-switch to the account with most remaining capacity |
-| `cc-use <index>` | Switch to a specific account |
-| `cc-capture` | Save current login session and auto-logout |
-| `cc-help` | Show command reference |
+| `cc` | List all accounts with rate limit bars |
+| `cc ls` | Same as above |
+| `cc use` | Interactive account picker (fzf) |
+| `cc use <n>` | Switch to account at index n |
+| `cc best` | Auto-switch to account with most remaining capacity |
+| `cc log [n]` | Show switch history (default: 20 entries) |
+| `cc stats` | GitHub-style usage heatmap + session statistics |
+| `cc capture` | Save current login session and auto-logout |
+| `cc help` | Show command reference |
 
 ## Usage
 
@@ -44,7 +49,7 @@ For each account you want to add:
 
 ```bash
 claude auth login   # log in with the target account
-cc-capture          # saves credentials and logs out
+cc capture          # saves credentials and logs out
 ```
 
 Repeat for all accounts. Then restore your main account:
@@ -58,16 +63,18 @@ claude auth login   # log back in with your primary account
 Close Claude Code first, then:
 
 ```bash
-cc-best             # auto-pick the account with most capacity
+cc best             # auto-pick the account with most capacity
 # or
-cc-use 1            # switch to account at index 1
+cc use              # interactive fzf picker
+# or
+cc use 1            # switch to account at index 1
 ```
 
 Relaunch Claude Code. The new account is active.
 
 ### Inside Claude Code
 
-Running `cc-best` from within a Claude Code session will automatically:
+Running `cc best` from within a Claude Code session will automatically:
 1. Switch to the best account (Keychain update)
 2. Kill the current session
 3. Resume with `claude --resume <session-id>`
@@ -75,8 +82,9 @@ Running `cc-best` from within a Claude Code session will automatically:
 ### Check status
 
 ```bash
-cc-ls       # account list with 5H/7D usage bars
-cc-stats    # heatmap of activity over the past year
+cc              # account list with ▶ active and ★ best markers
+cc stats        # heatmap of activity over the past year
+cc log          # switch history with before/after utilization
 ```
 
 ## How it works
@@ -84,9 +92,10 @@ cc-stats    # heatmap of activity over the past year
 Claude Code stores OAuth credentials in the macOS Keychain under `"Claude Code-credentials"`. `claude-code-multi-accounts` reads/writes `~/.ClaudeCodeMultiAccounts.json` and `~/.claude.json`.
 
 These scripts bridge the gap with Keychain awareness:
-- `cc-capture` syncs Keychain → file before snapshot
-- `cc-use` writes credentials to both file and Keychain before switching
-- `cc-best` picks the optimal account by lowest 5H utilization
+- `cc capture` syncs Keychain → file before snapshot
+- `cc use` writes credentials to both file and Keychain before switching
+- `cc best` picks the optimal account by lowest 5H utilization
+- Switch history is logged to `~/.cc-multiaccounts-history.jsonl`
 
 ## Rate limit display
 
@@ -98,6 +107,7 @@ These scripts bridge the gap with Keychain awareness:
 - **5H** = 5-hour rolling window utilization
 - **7D** = 7-day rolling window utilization
 - Bar fills = usage (red = near limit, green = plenty left)
+- `▶` = active account, `★` = recommended next account
 
 ## Dependencies
 

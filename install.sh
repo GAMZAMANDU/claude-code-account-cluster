@@ -14,15 +14,24 @@ else
     echo "claude-code-multi-accounts already installed: $(claude-code-multi-accounts --version 2>/dev/null || echo 'ok')"
 fi
 
-for script in bin/cc-*; do
-  name=$(basename "$script")
-  cp "$script" "$DEST/$name"
-  chmod +x "$DEST/$name"
-  echo "Installed $name → $DEST/$name"
+# Remove old cc-* binaries (replaced by single cc command)
+for old in cc-ls cc-use cc-best cc-log cc-stats cc-capture cc-help; do
+    if [ -f "$DEST/$old" ]; then
+        rm "$DEST/$old"
+        echo "Removed legacy $old"
+    fi
+done
+
+# Install new binaries
+for script in bin/cc bin/cc-switch; do
+    name=$(basename "$script")
+    cp "$script" "$DEST/$name"
+    chmod +x "$DEST/$name"
+    echo "Installed $name → $DEST/$name"
 done
 
 echo
 echo "Add ~/.local/bin to your PATH if not already:"
 echo '  export PATH="$HOME/.local/bin:$PATH"'
 echo
-echo "Run 'cc-help' to get started."
+echo "Run 'cc help' to get started."
