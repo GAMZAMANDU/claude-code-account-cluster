@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Switch Claude account: update .credentials.json + Keychain + cc-switch config."""
+import json, os, sys, subprocess
+
+STORE = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
+CREDS_FILE = os.path.expanduser("~/.claude/.credentials.json")
+
+def main():
+    if len(sys.argv) < 2:
+        subprocess.run(["cc-switch"])
+        return
+
+    if sys.stdin.isatty():
+        print("\033[33m⚠  Run this OUTSIDE Claude Code — Keychain update breaks active session.\033[0m")
+        print("\033[33m   Close Claude Code first, run cc-use, then relaunch.\033[0m")
+        print()
+        ans = input("Continue anyway? [y/N] ").strip().lower()
+        if ans != "y":
+            print("Cancelled.")
+            sys.exit(0)
+
+    index = int(sys.argv[1])
+
+    with open(STORE) as f:
+        store = json.load(f)
+
+    accounts = store.get("accounts", [])
+    if index >= len(accounts):
+        print(f"Error: no account at index {index}", file=sys.stderr)
+        sys.exit(1)
+
+    acc = accounts[index]
+    credentials = acc.get("credentials", {})
+    meta = acc.get("metadata", {})
+    email = meta.get("emailAddress", "?")
+    name = meta.get("displayName", "?")
+    creds_json = json.dumps(credentials)
+
+    # 1. Write credentials file (cc-switch reads/writes this)
+    os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+    with open(CREDS_FILE, "w") as f:
+        f.write(creds_json + "\n")
+
+    # 2. Update macOS Keychain so Claude Code picks up new session
+    result = subprocess.run(
+        ["security", "add-generic-password",
+         "-s", "Claude Code-credentials",
+         "-a", os.environ.get("USER", ""),
+         "-w", creds_json,
+         "-U"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"Keychain update failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Keychain updated → [{index}] {name} <{email}>")
+
+    # 3. Run cc-switch to update ~/.claude.json oauthAccount field
+    r = subprocess.run(["cc-switch", str(index)], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr.strip(), file=sys.stderr)
+        sys.exit(1)
+
+    # Print just the "Switched active account" line
+    for line in r.stdout.splitlines():
+        if "Switched" in line or "Restart" in line or "active account" in line:
+            print(line)
+
+if __name__ == "__main__":
+    main()
