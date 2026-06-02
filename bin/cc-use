@@ -1,71 +1,174 @@
 #!/usr/bin/env python3
-"""Switch Claude account: update .credentials.json + Keychain + cc-switch config."""
-import json, os, sys, subprocess
+"""Switch Claude account: fzf picker or index, before/after display, history logging."""
+import json, os, sys, subprocess, shutil, re
+from datetime import datetime, timezone
 
-STORE = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
+STORE      = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
 CREDS_FILE = os.path.expanduser("~/.claude/.credentials.json")
+CONFIG     = os.path.expanduser("~/.claude.json")
+HISTORY    = os.path.expanduser("~/.cc-multiaccounts-history.jsonl")
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+RED    = "\033[31m"
+
+def get_active_uuid():
+    try:
+        with open(CONFIG) as f:
+            return json.load(f).get("oauthAccount", {}).get("accountUuid")
+    except:
+        return None
+
+def fmt_pct(pct):
+    return f"{pct:.0f}%" if pct is not None else "?%"
+
+def color_pct(pct):
+    if pct is None:
+        return DIM + " ?%" + RESET
+    c = GREEN if pct <= 40 else YELLOW if pct <= 75 else RED
+    return c + f"{pct:3.0f}%" + RESET
+
+def fzf_pick(accounts, active_uuid):
+    lines = []
+    for i, acc in enumerate(accounts):
+        meta  = acc.get("metadata", {})
+        usage = acc.get("usageSnapshot", {})
+        fh    = (usage.get("five_hour") or {}).get("utilization")
+        sd    = (usage.get("seven_day")  or {}).get("utilization")
+        name  = meta.get("displayName", "?")
+        email = meta.get("emailAddress", "?")
+        mark  = "▶" if meta.get("accountUuid") == active_uuid else " "
+        lines.append(f"[{i}]{mark} {name} <{email}>  5H:{fmt_pct(fh)}  7D:{fmt_pct(sd)}")
+    proc = subprocess.run(
+        ["fzf", "--prompt=Switch to> ", "--height=50%", "--border", "--reverse"],
+        input="\n".join(lines), text=True, stdout=subprocess.PIPE
+    )
+    if proc.returncode != 0:
+        return None
+    m = re.match(r'\[(\d+)\]', proc.stdout.strip())
+    return int(m.group(1)) if m else None
+
+def prompt_pick(accounts, active_uuid):
+    for i, acc in enumerate(accounts):
+        meta  = acc.get("metadata", {})
+        usage = acc.get("usageSnapshot", {})
+        fh    = (usage.get("five_hour") or {}).get("utilization")
+        sd    = (usage.get("seven_day")  or {}).get("utilization")
+        name  = meta.get("displayName", "?")
+        email = meta.get("emailAddress", "?")
+        mark  = " ▶" if meta.get("accountUuid") == active_uuid else "  "
+        print(f"  [{i}]{mark} {name} <{email}>  5H:{fmt_pct(fh)}  7D:{fmt_pct(sd)}")
+    try:
+        return int(input("\nSelect index: ").strip())
+    except (ValueError, EOFError):
+        return None
+
+def append_history(from_idx, to_idx, from_acc, to_acc):
+    entry = {
+        "ts":        datetime.now(timezone.utc).isoformat(),
+        "from_idx":  from_idx,
+        "to_idx":    to_idx,
+        "from_name": (from_acc.get("metadata") or {}).get("displayName", "?"),
+        "to_name":   (to_acc.get("metadata")   or {}).get("displayName", "?"),
+        "from_5h":   ((from_acc.get("usageSnapshot") or {}).get("five_hour") or {}).get("utilization"),
+        "to_5h":     ((to_acc.get("usageSnapshot")   or {}).get("five_hour") or {}).get("utilization"),
+    }
+    with open(HISTORY, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 def main():
-    if len(sys.argv) < 2:
-        subprocess.run(["cc-switch"])
-        return
-
-    if sys.stdin.isatty():
-        print("\033[33m⚠  Run this OUTSIDE Claude Code — Keychain update breaks active session.\033[0m")
-        print("\033[33m   Close Claude Code first, run cc-use, then relaunch.\033[0m")
-        print()
-        ans = input("Continue anyway? [y/N] ").strip().lower()
-        if ans != "y":
-            print("Cancelled.")
-            sys.exit(0)
-
-    index = int(sys.argv[1])
+    # Refresh snapshot
+    try:
+        creds_raw = subprocess.check_output(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+        with open(CREDS_FILE, "w") as f:
+            f.write(creds_raw + "\n")
+    except:
+        pass
+    subprocess.run(["cc-switch"], capture_output=True)
 
     with open(STORE) as f:
         store = json.load(f)
+    accounts    = store.get("accounts", [])
+    active_uuid = get_active_uuid()
 
-    accounts = store.get("accounts", [])
+    if len(sys.argv) < 2:
+        if not sys.stdin.isatty():
+            subprocess.run(["cc-switch"])
+            return
+        if shutil.which("fzf"):
+            index = fzf_pick(accounts, active_uuid)
+        else:
+            index = prompt_pick(accounts, active_uuid)
+        if index is None:
+            print("Cancelled.")
+            sys.exit(0)
+    else:
+        if sys.stdin.isatty():
+            print(f"{YELLOW}⚠  Run OUTSIDE Claude Code — Keychain update breaks active session.{RESET}")
+            print(f"{YELLOW}   Close Claude Code first, run cc-use, then relaunch.{RESET}\n")
+            ans = input("Continue anyway? [y/N] ").strip().lower()
+            if ans != "y":
+                print("Cancelled.")
+                sys.exit(0)
+        index = int(sys.argv[1])
+
     if index >= len(accounts):
         print(f"Error: no account at index {index}", file=sys.stderr)
         sys.exit(1)
 
-    acc = accounts[index]
-    credentials = acc.get("credentials", {})
-    meta = acc.get("metadata", {})
-    email = meta.get("emailAddress", "?")
-    name = meta.get("displayName", "?")
-    creds_json = json.dumps(credentials)
+    active_idx = next((i for i, a in enumerate(accounts)
+                       if (a.get("metadata") or {}).get("accountUuid") == active_uuid), None)
+    from_acc = accounts[active_idx] if active_idx is not None else {}
+    to_acc   = accounts[index]
 
-    # 1. Write credentials file (cc-switch reads/writes this)
+    # Before → After display
+    if active_idx is not None and active_idx != index:
+        from_name = (from_acc.get("metadata") or {}).get("displayName", "?")
+        from_fh   = ((from_acc.get("usageSnapshot") or {}).get("five_hour") or {}).get("utilization")
+        to_name   = (to_acc.get("metadata") or {}).get("displayName", "?")
+        to_fh     = ((to_acc.get("usageSnapshot") or {}).get("five_hour") or {}).get("utilization")
+        print(f"\n  [{active_idx}] {from_name}  5H: {color_pct(from_fh)}")
+        print(f"       {DIM}↓{RESET}")
+        print(f"  [{index}] {to_name}  5H: {color_pct(to_fh)}\n")
+
+    credentials = to_acc.get("credentials", {})
+    meta        = to_acc.get("metadata", {})
+    email       = meta.get("emailAddress", "?")
+    name        = meta.get("displayName", "?")
+    creds_json  = json.dumps(credentials)
+
     os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
     with open(CREDS_FILE, "w") as f:
         f.write(creds_json + "\n")
 
-    # 2. Update macOS Keychain so Claude Code picks up new session
     result = subprocess.run(
         ["security", "add-generic-password",
          "-s", "Claude Code-credentials",
          "-a", os.environ.get("USER", ""),
-         "-w", creds_json,
-         "-U"],
+         "-w", creds_json, "-U"],
         capture_output=True, text=True
     )
     if result.returncode != 0:
         print(f"Keychain update failed: {result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
-
     print(f"Keychain updated → [{index}] {name} <{email}>")
 
-    # 3. Run cc-switch to update ~/.claude.json oauthAccount field
     r = subprocess.run(["cc-switch", str(index)], capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr.strip(), file=sys.stderr)
         sys.exit(1)
-
-    # Print just the "Switched active account" line
     for line in r.stdout.splitlines():
-        if "Switched" in line or "Restart" in line or "active account" in line:
+        if any(k in line for k in ("Switched", "Restart", "active account")):
             print(line)
+
+    append_history(active_idx, index, from_acc, to_acc)
 
 if __name__ == "__main__":
     main()

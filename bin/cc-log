@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Show account switch history."""
+import json, os, sys
+from datetime import datetime, timezone
+
+HISTORY = os.path.expanduser("~/.cc-multiaccounts-history.jsonl")
+
+RESET  = "\033[0m"
+BOLD   = "\033[1m"
+DIM    = "\033[2m"
+GREEN  = "\033[32m"
+YELLOW = "\033[33m"
+RED    = "\033[31m"
+CYAN   = "\033[36m"
+
+def color_pct(pct):
+    if pct is None:
+        return DIM + "  ?%" + RESET
+    c = GREEN if pct <= 40 else YELLOW if pct <= 75 else RED
+    return c + f"{pct:3.0f}%" + RESET
+
+def fmt_ts(iso):
+    try:
+        dt = datetime.fromisoformat(iso).astimezone()
+        return dt.strftime("%m/%d %H:%M")
+    except:
+        return iso[:16]
+
+def main():
+    limit = 20
+    if len(sys.argv) > 1:
+        try:
+            limit = int(sys.argv[1])
+        except:
+            pass
+
+    if not os.path.exists(HISTORY):
+        print(f"\n  {DIM}No history yet. Use cc-use or cc-best to switch accounts.{RESET}\n")
+        sys.exit(0)
+
+    with open(HISTORY) as f:
+        lines = [l.strip() for l in f if l.strip()]
+
+    entries = []
+    for line in lines:
+        try:
+            entries.append(json.loads(line))
+        except:
+            pass
+
+    if not entries:
+        print(f"\n  {DIM}No history.{RESET}\n")
+        sys.exit(0)
+
+    recent = entries[-limit:][::-1]
+
+    print()
+    print(f"  {BOLD}Switch History{RESET}  {DIM}(last {len(recent)} of {len(entries)}){RESET}")
+    print(f"  {DIM}{'─'*58}{RESET}")
+
+    for e in recent:
+        ts        = fmt_ts(e.get("ts", ""))
+        from_name = e.get("from_name", "?")
+        to_name   = e.get("to_name", "?")
+        from_idx  = e.get("from_idx", "?")
+        to_idx    = e.get("to_idx", "?")
+        from_5h   = e.get("from_5h")
+        to_5h     = e.get("to_5h")
+        print(f"  {DIM}{ts}{RESET}  [{from_idx}] {from_name} {color_pct(from_5h)} {DIM}→{RESET} [{to_idx}] {to_name} {color_pct(to_5h)}")
+
+    print(f"  {DIM}{'─'*58}{RESET}")
+    print(f"  {DIM}Total switches: {len(entries)}{RESET}")
+    print()
+
+if __name__ == "__main__":
+    main()
