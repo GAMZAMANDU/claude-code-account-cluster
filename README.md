@@ -2,7 +2,7 @@
 
 Multi-account switcher for [Claude Code](https://claude.ai/code) with rate limit visualization and auto-switching.
 
-Built on top of [ClaudeCodeMultiAccounts](https://github.com/nicholasgasior/ClaudeCodeMultiAccounts) (`cc-switch`).
+Built on top of [ClaudeCodeMultiAccounts](https://github.com/Leuconoe/ClaudeCodeMultiAccounts) (`claude-code-multi-accounts@0.3.8`).
 
 ## Why
 
@@ -11,17 +11,19 @@ Claude Code has 5-hour and 7-day rate limits. When one account hits the limit, y
 ## Requirements
 
 - macOS (uses Keychain via `security` CLI)
-- [ClaudeCodeMultiAccounts](https://github.com/nicholasgasior/ClaudeCodeMultiAccounts) (`cc-switch` must be in PATH)
+- Node.js + npm (to install `claude-code-multi-accounts` — handled by install.sh)
 - Python 3
 - Claude Code CLI
 
 ## Install
 
 ```bash
-git clone https://github.com/your-username/cc-multiaccounts
+git clone https://github.com/gamzamandu/cc-multiaccounts
 cd cc-multiaccounts
 bash install.sh
 ```
+
+`install.sh` automatically installs `claude-code-multi-accounts@0.3.8` if not present.
 
 ## Commands
 
@@ -79,9 +81,9 @@ cc-stats    # heatmap of activity over the past year
 
 ## How it works
 
-Claude Code stores OAuth credentials in the macOS Keychain under `"Claude Code-credentials"`. The `cc-switch` tool (from ClaudeCodeMultiAccounts) reads/writes `~/.claude/.credentials.json`, but newer Claude Code versions only use the Keychain.
+Claude Code stores OAuth credentials in the macOS Keychain under `"Claude Code-credentials"`. `claude-code-multi-accounts` reads/writes `~/.ClaudeCodeMultiAccounts.json` and `~/.claude.json`.
 
-These scripts bridge that gap:
+These scripts bridge the gap with Keychain awareness:
 - `cc-capture` syncs Keychain → file before snapshot
 - `cc-use` writes credentials to both file and Keychain before switching
 - `cc-best` picks the optimal account by lowest 5H utilization
@@ -96,6 +98,12 @@ These scripts bridge that gap:
 - **5H** = 5-hour rolling window utilization
 - **7D** = 7-day rolling window utilization
 - Bar fills = usage (red = near limit, green = plenty left)
+
+## Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| [claude-code-multi-accounts](https://github.com/Leuconoe/ClaudeCodeMultiAccounts) | 0.3.8 | Account store read/write and switching |
 
 ## License
 

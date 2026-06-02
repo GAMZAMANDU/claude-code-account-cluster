@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Shim: delegates to claude-code-multi-accounts (Leuconoe/ClaudeCodeMultiAccounts)
+if [ $# -eq 0 ]; then
+    exec claude-code-multi-accounts sync
+else
+    exec claude-code-multi-accounts switch "$@"
+fi

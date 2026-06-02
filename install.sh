@@ -2,7 +2,17 @@
 set -euo pipefail
 
 DEST="${HOME}/.local/bin"
+CCMA_VERSION="0.3.8"
+
 mkdir -p "$DEST"
+
+# Install dependency
+if ! command -v claude-code-multi-accounts &>/dev/null; then
+    echo "Installing claude-code-multi-accounts@${CCMA_VERSION}..."
+    npm install -g "claude-code-multi-accounts@${CCMA_VERSION}"
+else
+    echo "claude-code-multi-accounts already installed: $(claude-code-multi-accounts --version 2>/dev/null || echo 'ok')"
+fi
 
 for script in bin/cc-*; do
   name=$(basename "$script")
