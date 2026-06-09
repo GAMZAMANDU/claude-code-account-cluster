@@ -8,7 +8,7 @@ Y  = "\033[33m"; Re = "\033[31m"; C = "\033[36m"; W = "\033[97m"
 
 USAGE_API  = "https://claude.ai/api/oauth/usage"
 CACHE_FILE = "/tmp/cc-statusline-cache.json"
-CACHE_TTL  = 300  # 5 minutes
+CACHE_TTL  = 60  # 1 minute
 
 def load(path):
     try:
