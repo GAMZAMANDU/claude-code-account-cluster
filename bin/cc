@@ -365,33 +365,16 @@ def do_switch(accounts, active_uuid, index):
     append_history(active_idx, index, from_acc, to_acc)
 
 def cmd_use(args):
+    if not args:
+        print(f"Usage: cc use <index>", file=sys.stderr)
+        print(f"Run {CYAN}cc{RESET} to see account indices.")
+        sys.exit(1)
+
     sync_keychain()
     store       = load_store()
     accounts    = store.get("accounts", [])
     active_uuid = get_active_uuid()
-
-    if not args:
-        if not sys.stdin.isatty():
-            subprocess.run(["cc-switch"])
-            return
-        refresh_all_usage(store)
-        print_accounts(accounts, active_uuid,
-                       footer=f"{CYAN}index 입력 후 Enter  ·  취소: q{RESET}")
-        try:
-            raw = input(f"  {BOLD}Switch to [{DIM}0-{len(accounts)-1}{RESET}{BOLD}]{RESET}: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nCancelled.")
-            sys.exit(0)
-        if raw.lower() in ("q", ""):
-            print("Cancelled.")
-            sys.exit(0)
-        try:
-            index = int(raw)
-        except ValueError:
-            print(f"Invalid index: {raw}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        index = int(args[0])
+    index       = int(args[0])
 
     do_switch(accounts, active_uuid, index)
 
