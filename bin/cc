@@ -563,7 +563,8 @@ def do_switch(accounts, active_uuid, index):
 
     append_history(active_idx, index, from_acc, to_acc)
 
-    if os.environ.get("CLAUDECODE"):
+    # Restart if CC is in the process tree — works for both tool calls and ! commands
+    if _find_cc_pid():
         print(f"\n  {CYAN}↺  Restarting Claude Code with [{index}] {meta.get('displayName','?')}...{RESET}")
         _restart_with_account()
 
