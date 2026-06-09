@@ -479,21 +479,34 @@ def _find_cc_pid():
 
 
 def _restart_with_account():
-    """Kill CC; cmux handles restart automatically. Fallback to osascript for non-cmux terminals."""
+    """Kill CC and relaunch with --resume. Uses cmux send when available, osascript otherwise."""
     cc_pid = _find_cc_pid()
     if cc_pid is None:
         print(f"  {YELLOW}⚠  CC PID not found — restart manually: claude --resume{RESET}")
         return
 
-    in_cmux = bool(os.environ.get("CMUX_AGENT_LAUNCH_KIND"))
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    resume_cmd = f"claude --resume {session_id}" if session_id else "claude --resume"
+    cmux_bin   = os.environ.get("CMUX_CLAUDE_HOOK_CMUX_BIN", "")
+    surface_id = os.environ.get("CMUX_SURFACE_ID", "")
 
-    if not in_cmux:
-        # Not managed by cmux — inject restart command via osascript keystroke
-        session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-        resume_cmd = f"claude --resume {session_id}" if session_id else "claude --resume"
+    sys.stdout.flush()
+    time.sleep(0.5)  # give CC time to flush tool result to session before dying
+    os.kill(cc_pid, signal.SIGTERM)
+
+    if cmux_bin and surface_id:
+        # cmux: send the resume command directly to the correct terminal surface
+        time.sleep(0.4)  # let CC fully exit before sending
+        subprocess.Popen(
+            [cmux_bin, "send", "--surface", surface_id, resume_cmd + "\n"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    else:
+        # Non-cmux: inject keystrokes via osascript
         subprocess.Popen(
             ["osascript", "-e",
-             f'delay 0.7\n'
+             f'delay 0.9\n'
              f'tell application "System Events"\n'
              f'    keystroke "{resume_cmd}"\n'
              f'    key code 36\n'
@@ -501,11 +514,6 @@ def _restart_with_account():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-
-    sys.stdout.flush()
-    time.sleep(0.5)  # give CC time to flush tool result to session before dying
-    os.kill(cc_pid, signal.SIGTERM)
-    # cmux detects the exit and automatically runs `claude --resume <session-id>`
 
 
 def do_switch(accounts, active_uuid, index):
