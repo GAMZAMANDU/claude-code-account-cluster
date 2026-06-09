@@ -11,7 +11,7 @@ Usage:
   cc capture      Save current login and logout
   cc help         Show this help
 """
-import json, os, sys, subprocess, shutil, re, urllib.request, urllib.parse, time
+import json, os, sys, subprocess, shutil, re, urllib.request, urllib.parse, time, signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
@@ -318,6 +318,53 @@ def cmd_refresh(_args):
         save_store(store)
     print("Done.")
 
+def _find_cc_pid():
+    """Walk process tree upward to find the Claude Code process."""
+    pid = os.getpid()
+    for _ in range(12):
+        try:
+            ppid = int(subprocess.check_output(
+                ["ps", "-o", "ppid=", "-p", str(pid)], stderr=subprocess.DEVNULL
+            ).strip())
+        except Exception:
+            return None
+        if ppid <= 1:
+            return None
+        try:
+            cmd = subprocess.check_output(
+                ["ps", "-o", "command=", "-p", str(ppid)], stderr=subprocess.DEVNULL
+            ).decode().strip()
+            binary = cmd.split()[0] if cmd.split() else ""
+            if binary.endswith("/claude") or binary == "claude":
+                return ppid
+        except Exception:
+            pass
+        pid = ppid
+    return None
+
+
+def _restart_with_account():
+    """Kill CC and relaunch with --resume via osascript keystroke injection."""
+    cc_pid = _find_cc_pid()
+    if cc_pid is None:
+        print(f"  {YELLOW}⚠  CC PID not found — restart manually: claude --resume{RESET}")
+        return
+    # Queue keystrokes into frontmost window BEFORE killing CC so osascript is already running
+    subprocess.Popen(
+        ["osascript", "-e",
+         'delay 0.7\n'
+         'tell application "System Events"\n'
+         '    keystroke "claude --resume"\n'
+         '    key code 36\n'
+         'end tell'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    sys.stdout.flush()
+    time.sleep(0.2)
+    os.kill(cc_pid, signal.SIGTERM)
+
+
 def do_switch(accounts, active_uuid, index):
     if index >= len(accounts):
         print(f"Error: no account at index {index}", file=sys.stderr)
@@ -363,6 +410,11 @@ def do_switch(accounts, active_uuid, index):
             print(line)
 
     append_history(active_idx, index, from_acc, to_acc)
+
+    if os.environ.get("CLAUDECODE"):
+        print(f"\n  {CYAN}↺  Restarting Claude Code with [{index}] {meta.get('displayName','?')}...{RESET}")
+        _restart_with_account()
+
 
 def cmd_use(args):
     if not args:
