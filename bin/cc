@@ -605,11 +605,6 @@ def cmd_stats(_args):
 # ── cc capture ────────────────────────────────────────────────────────────────
 
 def cmd_capture(_args):
-    prev_uuid = get_active_uuid()
-    prev_store = load_store()
-    prev_idx = next((i for i, a in enumerate(prev_store.get("accounts", []))
-                     if _uuid(a) == prev_uuid), None)
-
     print("Syncing credentials from Keychain...")
     try:
         creds_raw = subprocess.check_output(
@@ -623,17 +618,24 @@ def cmd_capture(_args):
         print(f"{RED}Error: no credentials found in Keychain. Are you logged in?{RESET}", file=sys.stderr)
         sys.exit(1)
 
+    # identify the account being captured before logout
+    try:
+        captured_uid = json.loads(creds_raw).get("claudeAiOauth", {}).get("accountUuid")
+    except Exception:
+        captured_uid = None
+
     print("Saving account snapshot...")
     subprocess.run(["cc-switch"])
 
     print("Logging out...")
     subprocess.run(["claude", "auth", "logout"])
 
-    if prev_idx is not None:
-        print(f"Restoring [{prev_idx}]...")
-        store    = load_store()
-        accounts = store.get("accounts", [])
-        do_switch(accounts, None, prev_idx)
+    store    = load_store()
+    accounts = store.get("accounts", [])
+    idx = next((i for i, a in enumerate(accounts) if _uuid(a) == captured_uid), None)
+    if idx is not None:
+        print(f"Activating captured account [{idx}]...")
+        do_switch(accounts, None, idx)
     else:
         print("Done. Run 'cc use <n>' to switch accounts.")
 
