@@ -1,4 +1,4 @@
-# cc-multiaccounts
+# claude-code-account-cluster
 
 Multi-account switcher for [Claude Code](https://claude.ai/code) with live rate limit visualization, auto-switching, and seamless account restart.
 
