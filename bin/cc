@@ -258,38 +258,39 @@ def prompt_pick(accounts, active_uuid):
     except (ValueError, EOFError):
         return None
 
-def refresh_creds(acc):
+def _do_refresh(oauth):
+    payload = urllib.parse.urlencode({
+        "grant_type":    "refresh_token",
+        "refresh_token": oauth["refreshToken"],
+        "client_id":     OAUTH_CLIENT_ID,
+    }).encode()
+    req = urllib.request.Request(
+        OAUTH_TOKEN_URL,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    oauth["accessToken"] = data["access_token"]
+    oauth["expiresAt"]   = int(time.time() * 1000) + data.get("expires_in", 3600) * 1000
+    if "refresh_token" in data:
+        oauth["refreshToken"] = data["refresh_token"]
+    return True
+
+def refresh_creds(acc, force=False):
     creds = acc.get("credentials", {})
-    oauth = creds.get("claudeAiOauth", creds)  # nested or flat
+    oauth = creds.get("claudeAiOauth", creds)
 
-    refresh_token = oauth.get("refreshToken")
-    if not refresh_token:
+    if not oauth.get("refreshToken"):
         return False
-
-    expires_at = oauth.get("expiresAt", 0)
-    if expires_at and expires_at > int(time.time() * 1000) + 60_000:
-        return False
+    if not force:
+        expires_at = oauth.get("expiresAt", 0)
+        if expires_at and expires_at > int(time.time() * 1000) + 60_000:
+            return False
 
     try:
-        payload = urllib.parse.urlencode({
-            "grant_type":    "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id":     OAUTH_CLIENT_ID,
-        }).encode()
-        req = urllib.request.Request(
-            OAUTH_TOKEN_URL,
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-
-        oauth["accessToken"] = data["access_token"]
-        oauth["expiresAt"]   = int(time.time() * 1000) + data.get("expires_in", 3600) * 1000
-        if "refresh_token" in data:
-            oauth["refreshToken"] = data["refresh_token"]
-
+        _do_refresh(oauth)
         store = load_store()
         uid = _uuid(acc)
         for a in store.get("accounts", []):
@@ -297,12 +298,52 @@ def refresh_creds(acc):
                 a["credentials"] = creds
                 break
         save_store(store)
-
         print(f"  {GREEN}↻{RESET} Token refreshed.")
         return True
     except Exception as e:
         print(f"  {YELLOW}⚠  Token refresh failed: {e}{RESET}", file=sys.stderr)
         return False
+
+def _refresh_one(acc):
+    creds = acc.get("credentials", {})
+    oauth = creds.get("claudeAiOauth", creds)
+    if not oauth.get("refreshToken"):
+        return acc, "skip", None
+    expires_at = oauth.get("expiresAt", 0)
+    if expires_at and expires_at > int(time.time() * 1000) + 60_000:
+        return acc, "fresh", None
+    try:
+        _do_refresh(oauth)
+        return acc, "ok", None
+    except Exception as e:
+        return acc, "err", str(e)
+
+def cmd_refresh(_args):
+    store    = load_store()
+    accounts = store.get("accounts", [])
+    if not accounts:
+        print("No accounts.")
+        return
+
+    with ThreadPoolExecutor(max_workers=len(accounts)) as pool:
+        results = list(pool.map(_refresh_one, accounts))
+
+    changed = False
+    for acc, status, err in results:
+        name = (acc.get("metadata") or {}).get("displayName", "?")
+        if status == "ok":
+            print(f"  {GREEN}↻{RESET}  {name}")
+            changed = True
+        elif status == "err":
+            print(f"  {YELLOW}⚠{RESET}  {name}: {err}")
+        elif status == "fresh":
+            print(f"  {DIM}✓{RESET}  {name}: still valid")
+        else:
+            print(f"  {DIM}–{RESET}  {name}: no refresh token")
+
+    if changed:
+        save_store(store)
+    print("Done.")
 
 def do_switch(accounts, active_uuid, index):
     if index >= len(accounts):
@@ -631,6 +672,7 @@ def cmd_help(_args):
   {CYAN}cc log{RESET} {DIM}[n]{RESET}    전환 이력 조회 (기본 20개)
   {CYAN}cc stats{RESET}        사용량 히트맵 + 통계
   {CYAN}cc capture{RESET}      현재 로그인 계정 저장 후 자동 로그아웃
+  {CYAN}cc refresh{RESET}      모든 계정 OAuth 토큰 갱신
   {CYAN}cc help{RESET}         이 도움말
 
   {BOLD}계정 추가{RESET}
@@ -657,6 +699,7 @@ COMMANDS = {
     "log":     cmd_log,
     "stats":   cmd_stats,
     "capture": cmd_capture,
+    "refresh": cmd_refresh,
     "help":    cmd_help,
 }
 
