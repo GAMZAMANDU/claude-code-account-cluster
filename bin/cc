@@ -54,25 +54,45 @@ def fetch_usage(access_token):
             headers={"Authorization": f"Bearer {access_token}", "User-Agent": "claude-code/1.0"},
         )
         with urllib.request.urlopen(req, timeout=8) as r:
-            return json.loads(r.read())
+            return json.loads(r.read()), None
+    except urllib.error.HTTPError as e:
+        return None, e.code
     except Exception:
+        return None, None
+
+def _fetch_and_maybe_refresh(acc):
+    """Fetch usage; if 401, force-refresh token first and retry once."""
+    creds = acc.get("credentials", {})
+    oauth = creds.get("claudeAiOauth", creds)
+    token = oauth.get("accessToken")
+    if not token:
         return None
+
+    data, code = fetch_usage(token)
+    if data is not None:
+        return data
+
+    if code == 401 and oauth.get("refreshToken"):
+        try:
+            _do_refresh(oauth)
+            data, _ = fetch_usage(oauth["accessToken"])
+            return data
+        except Exception:
+            pass
+    return None
 
 def refresh_all_usage(store):
     accounts = store.get("accounts", [])
-    tokens = {_uuid(acc): acc.get("credentials", {}).get("claudeAiOauth", {}).get("accessToken")
-              for acc in accounts}
-    tokens = {uid: tok for uid, tok in tokens.items() if uid and tok}
-    if not tokens:
+    if not accounts:
         return
 
-    with ThreadPoolExecutor(max_workers=len(tokens)) as pool:
-        futures = {pool.submit(fetch_usage, tok): uid for uid, tok in tokens.items()}
+    with ThreadPoolExecutor(max_workers=len(accounts)) as pool:
+        futures = {pool.submit(_fetch_and_maybe_refresh, acc): acc for acc in accounts}
         results = {futures[f]: f.result() for f in as_completed(futures)}
 
     changed = False
     for acc in accounts:
-        usage = results.get(_uuid(acc))
+        usage = results.get(acc)
         if usage is None:
             continue
         snap = acc.get("usageSnapshot") or {}
@@ -283,8 +303,12 @@ def _refresh_one(acc):
     if not oauth.get("refreshToken"):
         return acc, "skip", None
     expires_at = oauth.get("expiresAt", 0)
-    if expires_at and expires_at > int(time.time() * 1000) + 60_000:
-        return acc, "fresh", None
+    token_looks_fresh = expires_at and expires_at > int(time.time() * 1000) + 60_000
+    if token_looks_fresh:
+        # verify against API — token may be revoked server-side even if not locally expired
+        _, code = fetch_usage(oauth.get("accessToken", ""))
+        if code != 401:
+            return acc, "fresh", None
     try:
         _do_refresh(oauth)
         return acc, "ok", None
@@ -657,7 +681,7 @@ def cmd_stats(_args):
 # ── cc capture ────────────────────────────────────────────────────────────────
 
 def cmd_capture(_args):
-    print("Syncing credentials from Keychain...")
+    print("Reading credentials from Keychain...")
     try:
         creds_raw = subprocess.check_output(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
@@ -667,29 +691,33 @@ def cmd_capture(_args):
         with open(CREDS_FILE, "w") as f:
             f.write(creds_raw + "\n")
     except subprocess.CalledProcessError:
-        print(f"{RED}Error: no credentials found in Keychain. Are you logged in?{RESET}", file=sys.stderr)
+        print(f"{RED}Error: no credentials found in Keychain. Log in first: claude auth login{RESET}", file=sys.stderr)
         sys.exit(1)
 
-    # identify the account being captured before logout
     try:
         captured_uid = json.loads(creds_raw).get("claudeAiOauth", {}).get("accountUuid")
     except Exception:
         captured_uid = None
 
-    print("Saving account snapshot...")
-    subprocess.run(["cc-switch"])
-
-    print("Logging out...")
-    subprocess.run(["claude", "auth", "logout"])
+    print("Saving to store...")
+    subprocess.run(["cc-switch"], capture_output=True)
 
     store    = load_store()
     accounts = store.get("accounts", [])
     idx = next((i for i, a in enumerate(accounts) if _uuid(a) == captured_uid), None)
+    name = (accounts[idx].get("metadata") or {}).get("displayName", "?") if idx is not None else "?"
+    email = (accounts[idx].get("metadata") or {}).get("emailAddress", "?") if idx is not None else "?"
+
+    print(f"Logging out...")
+    subprocess.run(["claude", "auth", "logout"], capture_output=True)
+
     if idx is not None:
-        print(f"Activating captured account [{idx}]...")
-        do_switch(accounts, None, idx)
+        print(f"\n  {GREEN}✓{RESET} [{idx}] {name} <{email}> captured.\n")
     else:
-        print("Done. Run 'cc use <n>' to switch accounts.")
+        print(f"\n  {YELLOW}⚠{RESET}  Account not found in store after save.\n")
+
+    print(f"  {DIM}Next account:{RESET} claude auth login")
+    print(f"  {DIM}Activate:    {RESET} cc use <n> or cc best\n")
 
 # ── cc remove ────────────────────────────────────────────────────────────────
 
