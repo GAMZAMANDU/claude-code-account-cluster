@@ -87,12 +87,12 @@ def refresh_all_usage(store):
         return
 
     with ThreadPoolExecutor(max_workers=len(accounts)) as pool:
-        futures = {pool.submit(_fetch_and_maybe_refresh, acc): acc for acc in accounts}
+        futures = {pool.submit(_fetch_and_maybe_refresh, acc): i for i, acc in enumerate(accounts)}
         results = {futures[f]: f.result() for f in as_completed(futures)}
 
     changed = False
-    for acc in accounts:
-        usage = results.get(acc)
+    for i, acc in enumerate(accounts):
+        usage = results.get(i)
         if usage is None:
             continue
         snap = acc.get("usageSnapshot") or {}
