@@ -680,24 +680,74 @@ def cmd_stats(_args):
 
 # ── cc capture ────────────────────────────────────────────────────────────────
 
+PROFILE_API = "https://claude.ai/api/oauth/profile"
+
+def _fetch_profile(access_token):
+    try:
+        req = urllib.request.Request(
+            PROFILE_API,
+            headers={"Authorization": f"Bearer {access_token}", "User-Agent": "claude-code/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        return data.get("account", {})
+    except Exception:
+        return {}
+
 def cmd_capture(_args):
     print("Reading credentials from Keychain...")
+    creds_raw = None
+
+    # Try Keychain first (older CC versions)
     try:
         creds_raw = subprocess.check_output(
             ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
             stderr=subprocess.DEVNULL
         ).decode().strip()
-        os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
-        with open(CREDS_FILE, "w") as f:
-            f.write(creds_raw + "\n")
     except subprocess.CalledProcessError:
-        print(f"{RED}Error: no credentials found in Keychain. Log in first: claude auth login{RESET}", file=sys.stderr)
+        pass
+
+    # Fall back to .credentials.json (newer CC versions)
+    if not creds_raw:
+        try:
+            with open(CREDS_FILE) as f:
+                creds_raw = f.read().strip()
+            if not creds_raw or creds_raw == "{}":
+                creds_raw = None
+        except Exception:
+            pass
+
+    if not creds_raw:
+        print(f"{RED}Error: no credentials found. Log in first: claude auth login{RESET}", file=sys.stderr)
         sys.exit(1)
 
+    os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+    with open(CREDS_FILE, "w") as f:
+        f.write(creds_raw + "\n")
+
     try:
-        captured_uid = json.loads(creds_raw).get("claudeAiOauth", {}).get("accountUuid")
+        creds_obj = json.loads(creds_raw)
     except Exception:
-        captured_uid = None
+        creds_obj = {}
+
+    oauth = creds_obj.get("claudeAiOauth", creds_obj)
+    access_token = oauth.get("accessToken", "")
+
+    # accountUuid may be absent in newer CC auth flow — fetch from profile API
+    captured_uid = oauth.get("accountUuid") or None
+    profile = {}
+    if (not captured_uid) and access_token:
+        profile = _fetch_profile(access_token)
+        captured_uid = profile.get("uuid")
+        if captured_uid:
+            oauth["accountUuid"] = captured_uid
+            creds_raw = json.dumps(creds_obj)
+            with open(CREDS_FILE, "w") as f:
+                f.write(creds_raw + "\n")
+
+    if not captured_uid:
+        print(f"{RED}Error: could not determine account UUID. Is the session valid?{RESET}", file=sys.stderr)
+        sys.exit(1)
 
     print("Saving to store...")
     subprocess.run(["cc-switch"], capture_output=True)
@@ -705,7 +755,26 @@ def cmd_capture(_args):
     store    = load_store()
     accounts = store.get("accounts", [])
     idx = next((i for i, a in enumerate(accounts) if _uuid(a) == captured_uid), None)
-    name = (accounts[idx].get("metadata") or {}).get("displayName", "?") if idx is not None else "?"
+
+    # If cc-switch didn't add it (new format), inject manually
+    if idx is None and profile:
+        new_acc = {
+            "metadata": {
+                "accountUuid":      captured_uid,
+                "displayName":      profile.get("display_name") or profile.get("full_name", "?"),
+                "emailAddress":     profile.get("email", ""),
+                "organizationType": "",
+                "seatTier":         "claude_pro" if profile.get("has_claude_pro") else "",
+            },
+            "credentials": creds_obj,
+            "usageSnapshot": {},
+        }
+        accounts.append(new_acc)
+        store["accounts"] = accounts
+        save_store(store)
+        idx = len(accounts) - 1
+
+    name  = (accounts[idx].get("metadata") or {}).get("displayName", "?") if idx is not None else "?"
     email = (accounts[idx].get("metadata") or {}).get("emailAddress", "?") if idx is not None else "?"
 
     print(f"Logging out...")
@@ -714,7 +783,7 @@ def cmd_capture(_args):
     if idx is not None:
         print(f"\n  {GREEN}✓{RESET} [{idx}] {name} <{email}> captured.\n")
     else:
-        print(f"\n  {YELLOW}⚠{RESET}  Account not found in store after save.\n")
+        print(f"\n  {YELLOW}⚠{RESET}  Could not identify account — check cc ls.\n")
 
     print(f"  {DIM}Next account:{RESET} claude auth login")
     print(f"  {DIM}Activate:    {RESET} cc use <n> or cc best\n")
