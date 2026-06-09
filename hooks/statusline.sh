@@ -66,11 +66,20 @@ def get_usage(uid, token):
     return data
 
 store    = load("~/.ClaudeCodeMultiAccounts.json")
-cfg      = load("~/.claude.json")
-uid      = (cfg.get("oauthAccount") or {}).get("accountUuid")
 accounts = store.get("accounts", [])
 
-# Fallback: read uid from .credentials.json (new CC auth flow omits oauthAccount)
+# Primary: cc-active-uid (immune to CC overwriting ~/.claude.json on startup)
+uid = None
+try:
+    with open(os.path.expanduser("~/.claude/cc-active-uid")) as f:
+        uid = f.read().strip() or None
+except Exception:
+    pass
+
+# Fallback chain
+if not uid:
+    cfg = load("~/.claude.json")
+    uid = (cfg.get("oauthAccount") or {}).get("accountUuid")
 if not uid:
     try:
         import subprocess

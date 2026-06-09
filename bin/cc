@@ -19,11 +19,12 @@ from collections import defaultdict
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
 
-STORE      = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
-CREDS_FILE = os.path.expanduser("~/.claude/.credentials.json")
-CONFIG     = os.path.expanduser("~/.claude.json")
-HISTORY    = os.path.expanduser("~/.cc-multiaccounts-history.jsonl")
-STATS_FILE = os.path.expanduser("~/.claude/stats-cache.json")
+STORE           = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
+CREDS_FILE      = os.path.expanduser("~/.claude/.credentials.json")
+CONFIG          = os.path.expanduser("~/.claude.json")
+HISTORY         = os.path.expanduser("~/.cc-multiaccounts-history.jsonl")
+STATS_FILE      = os.path.expanduser("~/.claude/stats-cache.json")
+ACTIVE_UID_FILE = os.path.expanduser("~/.claude/cc-active-uid")
 
 RESET   = "\033[0m"
 BOLD    = "\033[1m"
@@ -39,10 +40,18 @@ MAGENTA = "\033[35m"
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def get_active_uuid():
+    # Prefer our own file — CC overwrites oauthAccount in ~/.claude.json on startup
+    try:
+        with open(ACTIVE_UID_FILE) as f:
+            uid = f.read().strip()
+        if uid:
+            return uid
+    except Exception:
+        pass
     try:
         with open(CONFIG) as f:
             return json.load(f).get("oauthAccount", {}).get("accountUuid")
-    except:
+    except Exception:
         return None
 
 USAGE_API = "https://claude.ai/api/oauth/usage"
@@ -530,9 +539,15 @@ def do_switch(accounts, active_uuid, index):
         if any(k in line for k in ("Switched", "Restart", "active account")):
             print(line)
 
-    # Keep ~/.claude.json oauthAccount in sync for statusline
     uid = _uuid(to_acc)
     if uid:
+        # Write to our own file — CC overwrites oauthAccount in ~/.claude.json on startup
+        try:
+            with open(ACTIVE_UID_FILE, "w") as f:
+                f.write(uid + "\n")
+        except Exception:
+            pass
+        # Also update ~/.claude.json for compatibility (CC may overwrite this)
         try:
             with open(CONFIG) as f:
                 cfg = json.load(f)
