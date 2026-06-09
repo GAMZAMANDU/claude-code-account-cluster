@@ -479,28 +479,33 @@ def _find_cc_pid():
 
 
 def _restart_with_account():
-    """Kill CC and relaunch with --resume via osascript keystroke injection."""
+    """Kill CC; cmux handles restart automatically. Fallback to osascript for non-cmux terminals."""
     cc_pid = _find_cc_pid()
     if cc_pid is None:
         print(f"  {YELLOW}⚠  CC PID not found — restart manually: claude --resume{RESET}")
         return
-    # Use specific session ID if available so we resume the exact session
-    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-    resume_cmd = f"claude --resume {session_id}" if session_id else "claude --resume"
-    # Queue keystrokes into frontmost window BEFORE killing CC so osascript is already running
-    subprocess.Popen(
-        ["osascript", "-e",
-         f'delay 0.7\n'
-         f'tell application "System Events"\n'
-         f'    keystroke "{resume_cmd}"\n'
-         f'    key code 36\n'
-         f'end tell'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+
+    in_cmux = bool(os.environ.get("CMUX_AGENT_LAUNCH_KIND"))
+
+    if not in_cmux:
+        # Not managed by cmux — inject restart command via osascript keystroke
+        session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        resume_cmd = f"claude --resume {session_id}" if session_id else "claude --resume"
+        subprocess.Popen(
+            ["osascript", "-e",
+             f'delay 0.7\n'
+             f'tell application "System Events"\n'
+             f'    keystroke "{resume_cmd}"\n'
+             f'    key code 36\n'
+             f'end tell'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
     sys.stdout.flush()
     time.sleep(0.5)  # give CC time to flush tool result to session before dying
     os.kill(cc_pid, signal.SIGTERM)
+    # cmux detects the exit and automatically runs `claude --resume <session-id>`
 
 
 def do_switch(accounts, active_uuid, index):
