@@ -29,7 +29,12 @@ for script in bin/cc bin/cc-switch; do
 done
 
 # ── 3. Statusline ──────────────────────────────────────────────────────────────
-STATUSLINE_CMD="bash '${REPO_ROOT}/hooks/statusline.sh'"
+STATUSLINE_DEST="${HOME}/.claude/statusline-command.sh"
+STATUSLINE_CMD="bash '${STATUSLINE_DEST}'"
+
+cp "$REPO_ROOT/hooks/statusline.sh" "$STATUSLINE_DEST"
+chmod +x "$STATUSLINE_DEST"
+echo "Installed statusline → $STATUSLINE_DEST"
 
 if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
     python3 - "$CLAUDE_SETTINGS" "$STATUSLINE_CMD" <<'EOF'
@@ -44,7 +49,7 @@ print(f"Configured statusLine → {cmd}")
 EOF
 else
     echo "⚠  Set statusLine manually in ~/.claude/settings.json:"
-    echo "   \"statusLine\": {\"type\": \"command\", \"command\": \"bash '${REPO_ROOT}/hooks/statusline.sh'\"}"
+    echo "   \"statusLine\": {\"type\": \"command\", \"command\": \"${STATUSLINE_CMD}\"}"
 fi
 
 echo
