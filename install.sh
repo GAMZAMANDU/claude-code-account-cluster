@@ -1,37 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 DEST="${HOME}/.local/bin"
+CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 CCMA_VERSION="0.3.8"
 
 mkdir -p "$DEST"
 
-# Install dependency
+# ── 1. npm dependency ──────────────────────────────────────────────────────────
 if ! command -v claude-code-multi-accounts &>/dev/null; then
     echo "Installing claude-code-multi-accounts@${CCMA_VERSION}..."
     npm install -g "claude-code-multi-accounts@${CCMA_VERSION}"
 else
-    echo "claude-code-multi-accounts already installed: $(claude-code-multi-accounts --version 2>/dev/null || echo 'ok')"
+    echo "claude-code-multi-accounts: $(claude-code-multi-accounts --version 2>/dev/null || echo ok)"
 fi
 
-# Remove old cc-* binaries (replaced by single cc command)
+# ── 2. Binaries ────────────────────────────────────────────────────────────────
 for old in cc-ls cc-use cc-best cc-log cc-stats cc-capture cc-help; do
-    if [ -f "$DEST/$old" ]; then
-        rm "$DEST/$old"
-        echo "Removed legacy $old"
-    fi
+    [ -f "$DEST/$old" ] && rm "$DEST/$old" && echo "Removed legacy $old"
 done
 
-# Install new binaries
 for script in bin/cc bin/cc-switch; do
     name=$(basename "$script")
-    cp "$script" "$DEST/$name"
+    cp "$REPO_ROOT/$script" "$DEST/$name"
     chmod +x "$DEST/$name"
     echo "Installed $name → $DEST/$name"
 done
 
+# ── 3. Statusline ──────────────────────────────────────────────────────────────
+STATUSLINE_CMD="bash '${REPO_ROOT}/hooks/statusline.sh'"
+
+if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
+    python3 - "$CLAUDE_SETTINGS" "$STATUSLINE_CMD" <<'EOF'
+import json, sys
+path, cmd = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    cfg = json.load(f)
+cfg["statusLine"] = {"type": "command", "command": cmd}
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+print(f"Configured statusLine → {cmd}")
+EOF
+else
+    echo "⚠  Set statusLine manually in ~/.claude/settings.json:"
+    echo "   \"statusLine\": {\"type\": \"command\", \"command\": \"bash '${REPO_ROOT}/hooks/statusline.sh'\"}"
+fi
+
 echo
-echo "Add ~/.local/bin to your PATH if not already:"
+echo "Done. Add ~/.local/bin to PATH if needed:"
 echo '  export PATH="$HOME/.local/bin:$PATH"'
-echo
 echo "Run 'cc help' to get started."
