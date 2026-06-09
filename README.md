@@ -1,4 +1,4 @@
-# cc-multiaccounts
+# claude-code-account-cluster
 
 Multi-account switcher for [Claude Code](https://claude.ai/code) with live rate limit visualization, auto-switching, and seamless account restart.
 
@@ -97,6 +97,18 @@ cc-multiaccounts/
 │   └── statusline.sh   # statusline display script
 └── install.sh
 ```
+
+## Demo
+`cc ls`
+<img width="834" height="633" alt="image" src="https://github.com/user-attachments/assets/e9a72df2-6e33-4f0b-a1a9-afc5ed21e0e7" />
+
+`cc use [n]`
+<img width="787" height="454" alt="image" src="https://github.com/user-attachments/assets/70339d3c-a505-49c2-a4fc-fc4bf3c5ad4b" />
+
+`cc best`
+<img width="907" height="199" alt="image" src="https://github.com/user-attachments/assets/18817fcc-9724-440c-b78e-d15a5c11b486" />
+
+
 
 ## License
 
