@@ -11,7 +11,7 @@ Usage:
   cc capture      Save current login and logout
   cc help         Show this help
 """
-import json, os, sys, subprocess, shutil, re, stat, tempfile, urllib.request, urllib.parse, time
+import json, os, sys, subprocess, shutil, re, urllib.request, urllib.parse, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
@@ -258,62 +258,6 @@ def prompt_pick(accounts, active_uuid):
     except (ValueError, EOFError):
         return None
 
-def _ps(pid, fmt):
-    r = subprocess.run(["ps", "-p", str(pid), "-o", f"{fmt}="],
-                       capture_output=True, text=True)
-    return r.stdout.strip()
-
-def _find_cc_pid():
-    try:
-        cc_pid = int(_ps(os.getppid(), "ppid"))
-        if "claude" in _ps(cc_pid, "comm").lower():
-            return cc_pid
-        cc_pid2 = int(_ps(cc_pid, "ppid"))
-        if "claude" in _ps(cc_pid2, "comm").lower():
-            return cc_pid2
-    except Exception:
-        pass
-    return None
-
-def _restart_with_account(idx):
-    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-    claude_pid = os.environ.get("CMUX_CLAUDE_PID", "")
-    claude_bin = os.environ.get("CMUX_AGENT_LAUNCH_EXECUTABLE",
-                 os.path.expanduser("~/.local/bin/claude"))
-
-    cc_pid = int(claude_pid) if claude_pid else _find_cc_pid()
-    if not cc_pid:
-        print(f"{YELLOW}⚠  Can't find CC process — switch credentials manually after restart.{RESET}",
-              file=sys.stderr)
-        return  # fall through to do_switch
-
-    session_arg = f"--resume {session_id}" if session_id else ""
-    script_lines = [
-        "#!/usr/bin/env bash",
-        "sleep 0.5",
-        f"cc use {idx}",
-        "sleep 0.3",
-        f"{claude_bin} {session_arg}",
-    ]
-    script = "\n".join(script_lines) + "\n"
-
-    fd, path = tempfile.mkstemp(suffix=".sh", prefix="cc-resume-")
-    with os.fdopen(fd, "w") as f:
-        f.write(script)
-    os.chmod(path, stat.S_IRWXU)
-
-    subprocess.Popen(
-        ["nohup", "bash", path],
-        stdout=open("/tmp/cc-resume.log", "w"),
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    label = session_id[:8] if session_id else "new"
-    print(f"Switching → resuming {label}... (restarting CC)")
-    os.kill(cc_pid, 15)
-    sys.exit(0)
-
 def refresh_creds(acc):
     creds = acc.get("credentials", {})
     oauth = creds.get("claudeAiOauth", creds)  # nested or flat
@@ -421,17 +365,7 @@ def cmd_use(args):
             print("Cancelled.")
             sys.exit(0)
     else:
-        if sys.stdin.isatty():
-            print(f"{YELLOW}⚠  Run OUTSIDE Claude Code — Keychain update breaks active session.{RESET}")
-            print(f"{YELLOW}   Close Claude Code first, run cc use, then relaunch.{RESET}\n")
-            ans = input("Continue anyway? [y/N] ").strip().lower()
-            if ans != "y":
-                print("Cancelled.")
-                sys.exit(0)
         index = int(args[0])
-
-    if os.environ.get("CLAUDECODE") == "1":
-        _restart_with_account(index)
 
     do_switch(accounts, active_uuid, index)
 
@@ -464,10 +398,7 @@ def cmd_best(_args):
 
     print(f"Best: [{idx}] {meta.get('displayName','?')} <{meta.get('emailAddress','?')}> (5H:{fh_rem}% 7D:{sd_rem}%)")
 
-    if os.environ.get("CLAUDECODE") == "1":
-        _restart_with_account(idx)
-    else:
-        do_switch(accounts, active_uuid, idx)
+    do_switch(accounts, active_uuid, idx)
 
 # ── cc log ────────────────────────────────────────────────────────────────────
 
