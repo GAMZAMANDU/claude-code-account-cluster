@@ -14,8 +14,6 @@ Built on top of [ClaudeCodeMultiAccounts](https://github.com/Leuconoe/ClaudeCode
 
 ## Install
 
-### Script install
-
 ```bash
 git clone https://github.com/gamzamandu/cc-multiaccounts
 cd cc-multiaccounts
@@ -23,24 +21,6 @@ bash install.sh
 ```
 
 `install.sh` installs `claude-code-multi-accounts@0.3.8`, copies `cc`/`cc-switch` to `~/.local/bin`, and configures the statusline in `~/.claude/settings.json`.
-
-### As a Claude Code plugin
-
-Add to `~/.claude/settings.json`:
-
-```json
-"extraKnownMarketplaces": {
-  "cc-multiaccounts": {
-    "source": { "source": "github", "repo": "gamzamandu/cc-multiaccounts" }
-  }
-}
-```
-
-```bash
-claude plugin install cc-multiaccounts@cc-multiaccounts
-```
-
-> Plugin install activates the `rate_limit` auto-switch hook and `/cc` skill. Run `bash install.sh` separately for the statusline and `cc` binary.
 
 ## Requirements
 
@@ -61,6 +41,8 @@ claude plugin install cc-multiaccounts@cc-multiaccounts
 | `cc log [n]` | Switch history (default: 20) |
 | `cc stats` | Usage heatmap + session statistics |
 | `cc capture` | Save current login and logout |
+| `cc refresh` | Refresh OAuth tokens for all accounts |
+| `cc remove <n>` | Remove account at index n |
 | `cc help` | Command reference |
 
 ## Adding accounts
@@ -75,31 +57,25 @@ claude auth login   # restore your main account
 ## Statusline
 
 ```
-◉ gamzamandu  ████░░ 67%  resets 1h12m  ·  2/4 free  ·  › [3] tigimudon ░░░░░░ 5%
+◉ gamzamandu  ████░░ 67%  resets 1h12m  ·  2/4 free  ·  › [2] tigimudon ░░░░░░ 5%
 ```
 
 - **◉ / ⚠** — active account (⚠ = over 80% used)
 - **████░░** — 5H usage minibar
 - **resets 1h12m** — time until current account resets
 - **2/4 free** — accounts with capacity remaining
-- **› [3] tigimudon** — recommended next account
+- **› [2] tigimudon** — recommended next account
 
 ## Project structure
 
 ```
 cc-multiaccounts/
-├── .claude-plugin/
-│   ├── plugin.json          # hooks + skills manifest
-│   └── marketplace.json     # marketplace metadata
 ├── bin/
-│   ├── cc                   # main Python CLI
-│   └── cc-switch            # shim for claude-code-multi-accounts
+│   ├── cc           # main Python CLI
+│   └── cc-switch    # shim for claude-code-multi-accounts
 ├── hooks/
-│   ├── statusline.sh        # statusline display
-│   └── on-rate-limit.sh     # auto cc best on rate_limit notification
-├── skills/
-│   └── cc/
-│       └── SKILL.md         # /cc slash command
+│   ├── statusline.sh       # statusline display
+│   └── on-rate-limit.sh    # auto cc best on rate_limit notification
 └── install.sh
 ```
 
