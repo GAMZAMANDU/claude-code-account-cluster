@@ -605,6 +605,11 @@ def cmd_stats(_args):
 # ── cc capture ────────────────────────────────────────────────────────────────
 
 def cmd_capture(_args):
+    prev_uuid = get_active_uuid()
+    prev_store = load_store()
+    prev_idx = next((i for i, a in enumerate(prev_store.get("accounts", []))
+                     if _uuid(a) == prev_uuid), None)
+
     print("Syncing credentials from Keychain...")
     try:
         creds_raw = subprocess.check_output(
@@ -623,7 +628,14 @@ def cmd_capture(_args):
 
     print("Logging out...")
     subprocess.run(["claude", "auth", "logout"])
-    print("Done. Run 'cc use' to switch accounts.")
+
+    if prev_idx is not None:
+        print(f"Restoring [{prev_idx}]...")
+        store    = load_store()
+        accounts = store.get("accounts", [])
+        do_switch(accounts, None, prev_idx)
+    else:
+        print("Done. Run 'cc use <n>' to switch accounts.")
 
 # ── cc remove ────────────────────────────────────────────────────────────────
 
