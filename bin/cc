@@ -295,9 +295,26 @@ def print_accounts(accounts, active_uuid, footer=None):
         print(f"  {footer}")
     print()
 
+def _check_untracked_account(store):
+    """If current live session is not in store, print a capture suggestion."""
+    live = _read_live_creds()
+    if not live:
+        return
+    live_oauth = live.get("claudeAiOauth", live)
+    live_uid = live_oauth.get("accountUuid")
+    if not live_uid:
+        return
+    known = {_uuid(a) for a in store.get("accounts", [])}
+    if live_uid not in known:
+        email = live_oauth.get("emailAddress", "") or live_oauth.get("email", "")
+        label = f" <{email}>" if email else ""
+        print(f"\n  {YELLOW}⚠{RESET}  Current session{label} not in store.")
+        print(f"     Run {CYAN}cc capture{RESET} to add it.\n")
+
 def cmd_ls(_args):
     sync_keychain()
     store       = load_store()
+    _check_untracked_account(store)
     accounts    = store.get("accounts", [])
     refresh_all_usage(store)
     active_uuid = get_active_uuid()
