@@ -433,6 +433,22 @@ def do_switch(accounts, active_uuid, index):
         if any(k in line for k in ("Switched", "Restart", "active account")):
             print(line)
 
+    # Keep ~/.claude.json oauthAccount in sync for statusline
+    uid = _uuid(to_acc)
+    if uid:
+        try:
+            with open(CONFIG) as f:
+                cfg = json.load(f)
+            cfg["oauthAccount"] = {
+                "accountUuid": uid,
+                "emailAddress": meta.get("emailAddress", ""),
+                "displayName": meta.get("displayName", ""),
+            }
+            with open(CONFIG, "w") as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
+
     append_history(active_idx, index, from_acc, to_acc)
 
     if os.environ.get("CLAUDECODE"):
