@@ -490,15 +490,12 @@ def _restart_with_account():
     cmux_bin   = os.environ.get("CMUX_CLAUDE_HOOK_CMUX_BIN", "")
     surface_id = os.environ.get("CMUX_SURFACE_ID", "")
 
-    sys.stdout.flush()
-    time.sleep(0.5)  # give CC time to flush tool result to session before dying
-    os.kill(cc_pid, signal.SIGTERM)
-
+    # Spawn the restart command BEFORE killing CC — our process dies with CC otherwise
     if cmux_bin and surface_id:
-        # cmux: send the resume command directly to the correct terminal surface
-        time.sleep(0.4)  # let CC fully exit before sending
+        # cmux: send resume command to the exact surface after a short delay
         subprocess.Popen(
-            [cmux_bin, "send", "--surface", surface_id, resume_cmd + "\n"],
+            ["bash", "-c",
+             f"sleep 0.9 && {cmux_bin} send --surface {surface_id} {resume_cmd!r}$'\\n'"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -514,6 +511,10 @@ def _restart_with_account():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+    sys.stdout.flush()
+    time.sleep(0.5)  # give CC time to flush tool result to session before dying
+    os.kill(cc_pid, signal.SIGTERM)
 
 
 def do_switch(accounts, active_uuid, index):
