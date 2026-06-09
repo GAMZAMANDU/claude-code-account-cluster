@@ -1,4 +1,4 @@
-# claude-code-account-cluster
+# cc-multiaccounts
 
 Multi-account switcher for [Claude Code](https://claude.ai/code) with live rate limit visualization, auto-switching, and seamless account restart.
 
@@ -23,12 +23,19 @@ Built on top of [ClaudeCodeMultiAccounts](https://github.com/Leuconoe/ClaudeCode
 ## Install
 
 ```bash
-git clone https://github.com/gamzamandu/cc-multiaccounts
-cd cc-multiaccounts
+git clone https://github.com/GAMZAMANDU/claude-code-account-cluster
+cd claude-code-account-cluster
 bash install.sh
 ```
 
 `install.sh` installs `claude-code-multi-accounts@0.3.8`, copies `cc`/`cc-switch` to `~/.local/bin`, and wires up the statusline and hooks in `~/.claude/settings.json`.
+
+Then set up the background token refresh cron:
+
+```bash
+(crontab -l 2>/dev/null; echo "*/30 * * * * $HOME/.local/bin/cc refresh >> /tmp/cc-refresh.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "*/30 * * * * $HOME/.local/bin/cc-switch >> /tmp/cc-sync.log 2>&1") | crontab -
+```
 
 ## Commands
 
