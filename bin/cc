@@ -177,14 +177,8 @@ def append_history(from_idx, to_idx, from_acc, to_acc):
 
 # ── cc ls ─────────────────────────────────────────────────────────────────────
 
-def cmd_ls(_args):
-    sync_keychain()
-    store       = load_store()
-    accounts    = store.get("accounts", [])
-    refresh_all_usage(store)
-    active_uuid = get_active_uuid()
-    best        = best_idx(accounts)
-
+def print_accounts(accounts, active_uuid, footer=None):
+    best = best_idx(accounts)
     print()
     print(f"  {BOLD}Claude Accounts{RESET}  {DIM}({len(accounts)} stored){RESET}")
     print(f"  {DIM}{'─'*64}{RESET}")
@@ -203,10 +197,10 @@ def cmd_ls(_args):
         org   = meta.get("organizationType", meta.get("seatTier", ""))
         plan  = {"claude_pro": "Pro", "claude_team": "Team", "team_standard": "Team Std"}.get(org, org or "?")
 
-        fh       = usage.get("five_hour", {})
-        sd       = usage.get("seven_day", {})
-        fh_pct   = fh.get("utilization")
-        sd_pct   = sd.get("utilization")
+        fh     = usage.get("five_hour", {})
+        sd     = usage.get("seven_day", {})
+        fh_pct = fh.get("utilization")
+        sd_pct = sd.get("utilization")
 
         prefix   = f"{GREEN}{BOLD}▶{RESET}" if is_active else f"{YELLOW}★{RESET}" if is_best else " "
         idx_str  = f"{BOLD}[{i}]{RESET}" if is_active else f"{DIM}[{i}]{RESET}"
@@ -222,41 +216,20 @@ def cmd_ls(_args):
             print(f"  {DIM}{'─'*64}{RESET}")
 
     print(f"  {DIM}{'─'*64}{RESET}")
-    print(f"  {DIM}cc use to switch  ·  cc best for auto  ·  cc log for history{RESET}")
+    if footer:
+        print(f"  {footer}")
     print()
 
+def cmd_ls(_args):
+    sync_keychain()
+    store       = load_store()
+    accounts    = store.get("accounts", [])
+    refresh_all_usage(store)
+    active_uuid = get_active_uuid()
+    print_accounts(accounts, active_uuid,
+                   footer=f"{DIM}cc use to switch  ·  cc best for auto  ·  cc log for history{RESET}")
+
 # ── cc use ────────────────────────────────────────────────────────────────────
-
-def fzf_pick(accounts, active_uuid):
-    lines = []
-    for i, acc in enumerate(accounts):
-        meta  = acc.get("metadata", {})
-        usage = acc.get("usageSnapshot", {})
-        fh    = (usage.get("five_hour") or {}).get("utilization")
-        sd    = (usage.get("seven_day")  or {}).get("utilization")
-        mark  = "▶" if meta.get("accountUuid") == active_uuid else " "
-        lines.append(f"[{i}]{mark} {meta.get('displayName','?')} <{meta.get('emailAddress','?')}>  5H:{fmt_pct(fh)}  7D:{fmt_pct(sd)}")
-    proc = subprocess.run(
-        ["fzf", "--prompt=Switch to> ", "--height=50%", "--border", "--reverse"],
-        input="\n".join(lines), text=True, stdout=subprocess.PIPE
-    )
-    if proc.returncode != 0:
-        return None
-    m = re.match(r'\[(\d+)\]', proc.stdout.strip())
-    return int(m.group(1)) if m else None
-
-def prompt_pick(accounts, active_uuid):
-    for i, acc in enumerate(accounts):
-        meta  = acc.get("metadata", {})
-        usage = acc.get("usageSnapshot", {})
-        fh    = (usage.get("five_hour") or {}).get("utilization")
-        sd    = (usage.get("seven_day")  or {}).get("utilization")
-        mark  = " ▶" if meta.get("accountUuid") == active_uuid else "  "
-        print(f"  [{i}]{mark} {meta.get('displayName','?')} <{meta.get('emailAddress','?')}>  5H:{fmt_pct(fh)}  7D:{fmt_pct(sd)}")
-    try:
-        return int(input("\nSelect index: ").strip())
-    except (ValueError, EOFError):
-        return None
 
 def _do_refresh(oauth):
     payload = urllib.parse.urlencode({
@@ -401,10 +374,22 @@ def cmd_use(args):
         if not sys.stdin.isatty():
             subprocess.run(["cc-switch"])
             return
-        index = fzf_pick(accounts, active_uuid) if shutil.which("fzf") else prompt_pick(accounts, active_uuid)
-        if index is None:
+        refresh_all_usage(store)
+        print_accounts(accounts, active_uuid,
+                       footer=f"{CYAN}index 입력 후 Enter  ·  취소: q{RESET}")
+        try:
+            raw = input(f"  {BOLD}Switch to [{DIM}0-{len(accounts)-1}{RESET}{BOLD}]{RESET}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+            sys.exit(0)
+        if raw.lower() in ("q", ""):
             print("Cancelled.")
             sys.exit(0)
+        try:
+            index = int(raw)
+        except ValueError:
+            print(f"Invalid index: {raw}", file=sys.stderr)
+            sys.exit(1)
     else:
         index = int(args[0])
 
