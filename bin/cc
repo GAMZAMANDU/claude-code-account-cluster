@@ -908,6 +908,14 @@ def cmd_capture(_args):
     print(f"Logging out...")
     subprocess.run(["claude", "auth", "logout"], capture_output=True)
 
+    # Write active uid so statusline works immediately on fresh installs
+    if captured_uid:
+        try:
+            with open(ACTIVE_UID_FILE, "w") as f:
+                f.write(captured_uid + "\n")
+        except Exception:
+            pass
+
     if idx is not None:
         print(f"\n  {GREEN}✓{RESET} [{idx}] {name} <{email}> captured.\n")
     else:
