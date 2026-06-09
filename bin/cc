@@ -11,9 +11,13 @@ Usage:
   cc capture      Save current login and logout
   cc help         Show this help
 """
-import json, os, sys, subprocess, shutil, re, stat, tempfile
+import json, os, sys, subprocess, shutil, re, stat, tempfile, urllib.request, urllib.parse, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta, timezone
 from collections import defaultdict
+
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
 
 STORE      = os.path.expanduser("~/.ClaudeCodeMultiAccounts.json")
 CREDS_FILE = os.path.expanduser("~/.claude/.credentials.json")
@@ -41,6 +45,46 @@ def get_active_uuid():
     except:
         return None
 
+USAGE_API = "https://claude.ai/api/oauth/usage"
+
+def fetch_usage(access_token):
+    try:
+        req = urllib.request.Request(
+            USAGE_API,
+            headers={"Authorization": f"Bearer {access_token}", "User-Agent": "claude-code/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+def refresh_all_usage(store):
+    accounts = store.get("accounts", [])
+    tokens = {_uuid(acc): acc.get("credentials", {}).get("claudeAiOauth", {}).get("accessToken")
+              for acc in accounts}
+    tokens = {uid: tok for uid, tok in tokens.items() if uid and tok}
+    if not tokens:
+        return
+
+    with ThreadPoolExecutor(max_workers=len(tokens)) as pool:
+        futures = {pool.submit(fetch_usage, tok): uid for uid, tok in tokens.items()}
+        results = {futures[f]: f.result() for f in as_completed(futures)}
+
+    changed = False
+    for acc in accounts:
+        usage = results.get(_uuid(acc))
+        if usage is None:
+            continue
+        snap = acc.get("usageSnapshot") or {}
+        for key in ("five_hour", "seven_day"):
+            if usage.get(key):
+                snap[key] = {"utilization": usage[key].get("utilization"),
+                             "resets_at":   usage[key].get("resets_at")}
+        acc["usageSnapshot"] = snap
+        changed = True
+    if changed:
+        save_store(store)
+
 def sync_keychain():
     try:
         creds_raw = subprocess.check_output(
@@ -57,6 +101,13 @@ def sync_keychain():
 def load_store():
     with open(STORE) as f:
         return json.load(f)
+
+def save_store(store):
+    with open(STORE, "w") as f:
+        json.dump(store, f, indent=2)
+
+def _uuid(acc):
+    return (acc.get("metadata") or {}).get("accountUuid")
 
 def best_idx(accounts):
     best, best_score = None, (-1, -1)
@@ -130,6 +181,7 @@ def cmd_ls(_args):
     sync_keychain()
     store       = load_store()
     accounts    = store.get("accounts", [])
+    refresh_all_usage(store)
     active_uuid = get_active_uuid()
     best        = best_idx(accounts)
 
@@ -206,13 +258,115 @@ def prompt_pick(accounts, active_uuid):
     except (ValueError, EOFError):
         return None
 
+def _ps(pid, fmt):
+    r = subprocess.run(["ps", "-p", str(pid), "-o", f"{fmt}="],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+def _find_cc_pid():
+    try:
+        cc_pid = int(_ps(os.getppid(), "ppid"))
+        if "claude" in _ps(cc_pid, "comm").lower():
+            return cc_pid
+        cc_pid2 = int(_ps(cc_pid, "ppid"))
+        if "claude" in _ps(cc_pid2, "comm").lower():
+            return cc_pid2
+    except Exception:
+        pass
+    return None
+
+def _restart_with_account(idx):
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    claude_pid = os.environ.get("CMUX_CLAUDE_PID", "")
+    claude_bin = os.environ.get("CMUX_AGENT_LAUNCH_EXECUTABLE",
+                 os.path.expanduser("~/.local/bin/claude"))
+
+    cc_pid = int(claude_pid) if claude_pid else _find_cc_pid()
+    if not cc_pid:
+        print(f"{YELLOW}⚠  Can't find CC process — switch credentials manually after restart.{RESET}",
+              file=sys.stderr)
+        return  # fall through to do_switch
+
+    session_arg = f"--resume {session_id}" if session_id else ""
+    script_lines = [
+        "#!/usr/bin/env bash",
+        "sleep 0.5",
+        f"cc use {idx}",
+        "sleep 0.3",
+        f"{claude_bin} {session_arg}",
+    ]
+    script = "\n".join(script_lines) + "\n"
+
+    fd, path = tempfile.mkstemp(suffix=".sh", prefix="cc-resume-")
+    with os.fdopen(fd, "w") as f:
+        f.write(script)
+    os.chmod(path, stat.S_IRWXU)
+
+    subprocess.Popen(
+        ["nohup", "bash", path],
+        stdout=open("/tmp/cc-resume.log", "w"),
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    label = session_id[:8] if session_id else "new"
+    print(f"Switching → resuming {label}... (restarting CC)")
+    os.kill(cc_pid, 15)
+    sys.exit(0)
+
+def refresh_creds(acc):
+    creds = acc.get("credentials", {})
+    oauth = creds.get("claudeAiOauth", creds)  # nested or flat
+
+    refresh_token = oauth.get("refreshToken")
+    if not refresh_token:
+        return False
+
+    expires_at = oauth.get("expiresAt", 0)
+    if expires_at and expires_at > int(time.time() * 1000) + 60_000:
+        return False
+
+    try:
+        payload = urllib.parse.urlencode({
+            "grant_type":    "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id":     OAUTH_CLIENT_ID,
+        }).encode()
+        req = urllib.request.Request(
+            OAUTH_TOKEN_URL,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+
+        oauth["accessToken"] = data["access_token"]
+        oauth["expiresAt"]   = int(time.time() * 1000) + data.get("expires_in", 3600) * 1000
+        if "refresh_token" in data:
+            oauth["refreshToken"] = data["refresh_token"]
+
+        store = load_store()
+        uid = _uuid(acc)
+        for a in store.get("accounts", []):
+            if _uuid(a) == uid:
+                a["credentials"] = creds
+                break
+        save_store(store)
+
+        print(f"  {GREEN}↻{RESET} Token refreshed.")
+        return True
+    except Exception as e:
+        print(f"  {YELLOW}⚠  Token refresh failed: {e}{RESET}", file=sys.stderr)
+        return False
+
 def do_switch(accounts, active_uuid, index):
     if index >= len(accounts):
         print(f"Error: no account at index {index}", file=sys.stderr)
         sys.exit(1)
 
     active_idx = next((i for i, a in enumerate(accounts)
-                       if (a.get("metadata") or {}).get("accountUuid") == active_uuid), None)
+                       if _uuid(a) == active_uuid), None)
     from_acc = accounts[active_idx] if active_idx is not None else {}
     to_acc   = accounts[index]
 
@@ -222,6 +376,8 @@ def do_switch(accounts, active_uuid, index):
         print(f"\n  [{active_idx}] {(from_acc.get('metadata') or {}).get('displayName','?')}  5H: {color_pct(from_fh)}")
         print(f"       {DIM}↓{RESET}")
         print(f"  [{index}] {(to_acc.get('metadata') or {}).get('displayName','?')}  5H: {color_pct(to_fh)}\n")
+
+    refresh_creds(to_acc)
 
     meta       = to_acc.get("metadata", {})
     creds_json = json.dumps(to_acc.get("credentials", {}))
@@ -274,6 +430,9 @@ def cmd_use(args):
                 sys.exit(0)
         index = int(args[0])
 
+    if os.environ.get("CLAUDECODE") == "1":
+        _restart_with_account(index)
+
     do_switch(accounts, active_uuid, index)
 
 # ── cc best ───────────────────────────────────────────────────────────────────
@@ -306,37 +465,7 @@ def cmd_best(_args):
     print(f"Best: [{idx}] {meta.get('displayName','?')} <{meta.get('emailAddress','?')}> (5H:{fh_rem}% 7D:{sd_rem}%)")
 
     if os.environ.get("CLAUDECODE") == "1":
-        session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-        claude_pid = os.environ.get("CMUX_CLAUDE_PID", "")
-        claude_bin = os.environ.get("CMUX_AGENT_LAUNCH_EXECUTABLE",
-                     os.path.expanduser("~/.local/bin/claude"))
-
-        script = f"""#!/usr/bin/env bash
-sleep 0.5
-cc use {idx}
-sleep 0.3
-if [ -n "{session_id}" ]; then
-    {claude_bin} --resume {session_id}
-else
-    {claude_bin}
-fi
-"""
-        fd, path = tempfile.mkstemp(suffix=".sh", prefix="cc-resume-")
-        with os.fdopen(fd, "w") as f:
-            f.write(script)
-        os.chmod(path, stat.S_IRWXU)
-
-        subprocess.Popen(
-            ["nohup", "bash", path],
-            stdout=open("/tmp/cc-resume.log", "w"),
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        print(f"Switching → will resume session {session_id[:8]}... after restart.")
-        if claude_pid:
-            os.kill(int(claude_pid), 15)
-        sys.exit(0)
+        _restart_with_account(idx)
     else:
         do_switch(accounts, active_uuid, idx)
 
