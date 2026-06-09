@@ -917,8 +917,18 @@ def cmd_capture(_args):
     name  = (accounts[idx].get("metadata") or {}).get("displayName", "?") if idx is not None else "?"
     email = (accounts[idx].get("metadata") or {}).get("emailAddress", "?") if idx is not None else "?"
 
-    print(f"Logging out...")
-    subprocess.run(["claude", "auth", "logout"], capture_output=True)
+    # Clear local credentials without server-side token revocation.
+    # `claude auth logout` calls the revocation endpoint and kills the token we just saved.
+    print(f"Clearing local session...")
+    try:
+        with open(CREDS_FILE, "w") as f:
+            f.write("{}\n")
+    except Exception:
+        pass
+    subprocess.run(
+        ["security", "delete-generic-password", "-s", "Claude Code-credentials"],
+        capture_output=True
+    )
 
     # Write active uid so statusline works immediately on fresh installs
     if captured_uid:
