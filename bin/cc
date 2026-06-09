@@ -657,6 +657,38 @@ def cmd_capture(_args):
     subprocess.run(["claude", "auth", "logout"])
     print("Done. Run 'cc use' to switch accounts.")
 
+# ── cc remove ────────────────────────────────────────────────────────────────
+
+def cmd_remove(args):
+    if not args:
+        print(f"Usage: cc remove <index>", file=sys.stderr)
+        sys.exit(1)
+    store    = load_store()
+    accounts = store.get("accounts", [])
+    try:
+        index = int(args[0])
+    except ValueError:
+        print(f"Invalid index: {args[0]}", file=sys.stderr)
+        sys.exit(1)
+    if index < 0 or index >= len(accounts):
+        print(f"No account at index {index}", file=sys.stderr)
+        sys.exit(1)
+
+    acc  = accounts[index]
+    name  = (acc.get("metadata") or {}).get("displayName", "?")
+    email = (acc.get("metadata") or {}).get("emailAddress", "?")
+
+    if sys.stdin.isatty():
+        ans = input(f"Remove [{index}] {name} <{email}>? [y/N] ").strip().lower()
+        if ans != "y":
+            print("Cancelled.")
+            sys.exit(0)
+
+    accounts.pop(index)
+    store["accounts"] = accounts
+    save_store(store)
+    print(f"Removed [{index}] {name} <{email}>")
+
 # ── cc help ───────────────────────────────────────────────────────────────────
 
 def cmd_help(_args):
@@ -673,6 +705,7 @@ def cmd_help(_args):
   {CYAN}cc stats{RESET}        사용량 히트맵 + 통계
   {CYAN}cc capture{RESET}      현재 로그인 계정 저장 후 자동 로그아웃
   {CYAN}cc refresh{RESET}      모든 계정 OAuth 토큰 갱신
+  {CYAN}cc remove{RESET} {DIM}<n>{RESET}  계정 삭제
   {CYAN}cc help{RESET}         이 도움말
 
   {BOLD}계정 추가{RESET}
@@ -700,6 +733,7 @@ COMMANDS = {
     "stats":   cmd_stats,
     "capture": cmd_capture,
     "refresh": cmd_refresh,
+    "remove":  cmd_remove,
     "help":    cmd_help,
 }
 
