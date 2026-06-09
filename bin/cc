@@ -118,6 +118,61 @@ def sync_keychain():
         pass
     subprocess.run(["cc-switch"], capture_output=True)
 
+def _read_live_creds():
+    """Read current credentials from keychain or CREDS_FILE (CC's live token)."""
+    for src in ["keychain", "file"]:
+        try:
+            if src == "keychain":
+                raw = subprocess.check_output(
+                    ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                    stderr=subprocess.DEVNULL).decode().strip()
+            else:
+                with open(CREDS_FILE) as f:
+                    raw = f.read().strip()
+            if raw and raw != "{}":
+                return json.loads(raw)
+        except Exception:
+            continue
+    return None
+
+def _write_keychain(creds_json):
+    """Write credentials JSON string to both keychain and CREDS_FILE."""
+    try:
+        subprocess.run(
+            ["security", "add-generic-password", "-s", "Claude Code-credentials",
+             "-a", os.environ.get("USER", ""), "-w", creds_json, "-U"],
+            capture_output=True)
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(CREDS_FILE), exist_ok=True)
+        with open(CREDS_FILE, "w") as f:
+            f.write(creds_json + "\n")
+    except Exception:
+        pass
+
+def _capture_live_into_store(store):
+    """
+    Read CC's current live token (keychain/CREDS_FILE) and update the matching
+    store entry. Call this before switching accounts so we don't lose any token
+    rotations CC performed during the session.
+    """
+    live = _read_live_creds()
+    if not live:
+        return
+    live_oauth = live.get("claudeAiOauth", live)
+    live_uid = live_oauth.get("accountUuid")
+    if not live_uid:
+        return
+    for acc in store.get("accounts", []):
+        if _uuid(acc) == live_uid:
+            # Only update if refresh_token changed — avoids overwriting with stale data
+            stored_rt = (acc.get("credentials", {}).get("claudeAiOauth", {}) or {}).get("refreshToken")
+            live_rt = live_oauth.get("refreshToken")
+            if live_rt and live_rt != stored_rt:
+                acc["credentials"] = live
+            break
+
 def load_store():
     with open(STORE) as f:
         return json.load(f)
@@ -297,11 +352,15 @@ def refresh_creds(acc, force=False):
         print(f"  {YELLOW}⚠  Token refresh failed: {e}{RESET}", file=sys.stderr)
         return False
 
-def _refresh_one(acc):
+def _refresh_one(acc, active_uid=None):
     creds = acc.get("credentials", {})
     oauth = creds.get("claudeAiOauth", creds)
     if not oauth.get("refreshToken"):
         return acc, "skip", None
+    # Skip the currently-active account: CC manages its own token while running.
+    # Refreshing it here would consume the refresh_token before CC can use it.
+    if active_uid and _uuid(acc) == active_uid:
+        return acc, "skip_active", None
     expires_at = oauth.get("expiresAt", 0)
     token_looks_fresh = expires_at and expires_at > int(time.time() * 1000) + 60_000
     if token_looks_fresh:
@@ -317,26 +376,41 @@ def _refresh_one(acc):
 
 def cmd_refresh(_args):
     store    = load_store()
+    # Capture any token rotations CC performed before refreshing
+    _capture_live_into_store(store)
     accounts = store.get("accounts", [])
     if not accounts:
         print("No accounts.")
         return
 
+    active_uid = get_active_uuid()
+
     with ThreadPoolExecutor(max_workers=len(accounts)) as pool:
-        results = list(pool.map(_refresh_one, accounts))
+        futures = {pool.submit(_refresh_one, acc, active_uid): i for i, acc in enumerate(accounts)}
+        results = {futures[f]: f.result() for f in as_completed(futures)}
 
     changed = False
-    for acc, status, err in results:
+    active_name = None
+    for i, acc in enumerate(accounts):
+        _, status, err = results[i]
         name = (acc.get("metadata") or {}).get("displayName", "?")
         if status == "ok":
             print(f"  {GREEN}↻{RESET}  {name}")
             changed = True
+            # Also push refreshed token to keychain so next CC session loads it
+            creds_json = json.dumps(acc.get("credentials", {}))
+            _write_keychain(creds_json)
         elif status == "err":
             print(f"  {YELLOW}⚠{RESET}  {name}: {err}")
         elif status == "fresh":
             print(f"  {DIM}✓{RESET}  {name}: still valid")
+        elif status == "skip_active":
+            active_name = name
         else:
             print(f"  {DIM}–{RESET}  {name}: no refresh token")
+
+    if active_name:
+        print(f"  {DIM}○{RESET}  {active_name}: active in CC — skipped")
 
     if changed:
         save_store(store)
@@ -393,6 +467,12 @@ def do_switch(accounts, active_uuid, index):
     if index >= len(accounts):
         print(f"Error: no account at index {index}", file=sys.stderr)
         sys.exit(1)
+
+    # Capture any token rotations CC performed during the current session
+    store = load_store()
+    _capture_live_into_store(store)
+    save_store(store)
+    accounts = store.get("accounts", [])
 
     active_idx = next((i for i, a in enumerate(accounts)
                        if _uuid(a) == active_uuid), None)
